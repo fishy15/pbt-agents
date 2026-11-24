@@ -59,6 +59,10 @@ NAME_SWAPS = {
 }
 
 
+STATEMENT_KINDS = {"stmt_delete", "return_value", "loop_bound", "index_shift", "wrong_variable"}
+MAX_WRONG_VAR = 10  # cap per task; there are many candidates and they are cheap variations
+
+
 @dataclass
 class Mutant:
     task_id: str
@@ -102,7 +106,17 @@ def _find_op(src: _Source, a: int, b: int, op: str) -> int | None:
     return a + seg.index(op)
 
 
-def propose(solution: str, prompt: str) -> list[tuple[str, str, int, int, str]]:
+def _bound_names(fn: ast.AST) -> set[str]:
+    a = fn.args
+    names = {x.arg for x in a.posonlyargs + a.args + a.kwonlyargs}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            names.add(n.id)
+    return names
+
+
+def propose(solution: str, prompt: str, rng: random.Random | None = None,
+            level: str = "all") -> list[tuple[str, str, int, int, str]]:
     """Return (operator, description, start, end, replacement) edits on `solution`.
 
     The solution is a function *body*, so we parse it together with the prompt
@@ -112,11 +126,33 @@ def propose(solution: str, prompt: str) -> list[tuple[str, str, int, int, str]]:
     tree = ast.parse(full)
     src = _Source(full)
     offset = len(prompt)
+    rng = rng or random.Random(0)
+    parents = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
     edits: list[tuple[str, str, int, int, str]] = []
 
     def add(kind: str, a: int, b: int, new: str):
         if a >= offset and new != full[a:b]:
-            edits.append((kind, f"{full[a:b]!r} -> {new!r}", a - offset, b - offset, new))
+            old = full[a:b]
+            old = old if len(old) <= 50 else old[:47] + "..."
+            edits.append((kind, f"{old!r} -> {new!r}", a - offset, b - offset, new))
+
+    def text(n: ast.AST) -> str:
+        a, b = src.span(n)
+        return full[a:b]
+
+    def wrapped(n: ast.AST) -> str:
+        t = text(n)
+        simple = (ast.Name, ast.Constant, ast.Call, ast.Attribute, ast.Subscript)
+        return t if isinstance(n, simple) else f"({t})"
+
+    def enclosing_fn(n: ast.AST):
+        while n in parents:
+            n = parents[n]
+            if isinstance(n, ast.FunctionDef):
+                return n
+        return None
+
+    wrong_vars: list[tuple[str, str, int, int, str]] = []
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Compare):
@@ -186,6 +222,93 @@ def propose(solution: str, prompt: str) -> list[tuple[str, str, int, int, str]]:
             a, b = src.span(node.value)
             if isinstance(node.value, ast.Constant) and isinstance(node.value.value, bool):
                 add("bool_const", a, b, str(not node.value.value))
+
+    # ---- statement-level mutations ----
+    for node in ast.walk(tree):
+        # delete a statement / guard / early return
+        if isinstance(node, ast.stmt) and hasattr(node, "lineno"):
+            par = parents.get(node)
+            deletable = (
+                isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Continue, ast.Break))
+                or (isinstance(node, ast.Expr) and not isinstance(node.value, ast.Constant))
+                or (isinstance(node, ast.If) and not node.orelse
+                    and node.end_lineno - node.lineno <= 2
+                    and not (isinstance(par, ast.If) and par.orelse == [node]))
+                or (isinstance(node, ast.Return) and not isinstance(par, ast.FunctionDef))
+            )
+            if deletable:
+                a, b = src.span(node)
+                add("stmt_delete", a, b, "pass")
+
+        # replace the returned value
+        if isinstance(node, ast.Return) and node.value is not None:
+            a, b = src.span(node.value)
+            if not (isinstance(node.value, ast.Constant) and node.value.value is None):
+                add("return_value", a, b, "None")
+            if isinstance(node.value, (ast.Compare, ast.BoolOp)):
+                add("return_value", a, b, f"not ({full[a:b]})")
+
+        # loop bounds
+        if isinstance(node, (ast.For, ast.comprehension)):
+            it = node.iter
+            a, b = src.span(it)
+            if (isinstance(it, ast.Call) and isinstance(it.func, ast.Name)
+                    and it.func.id == "range" and 1 <= len(it.args) <= 2):
+                if len(it.args) == 1:
+                    add("loop_bound", src.span(it.args[0])[0], src.span(it.args[0])[1],
+                        f"1, {text(it.args[0])}")
+                for arg in it.args:
+                    if isinstance(arg, ast.Constant):
+                        continue  # int_const already covers these
+                    s0, s1 = src.span(arg)
+                    add("loop_bound", s0, s1, wrapped(arg) + "+1")
+                    add("loop_bound", s0, s1, wrapped(arg) + "-1")
+            elif isinstance(it, (ast.Name, ast.Attribute, ast.Subscript)):
+                t = full[a:b]
+                add("loop_bound", a, b, f"{t}[1:]")
+                add("loop_bound", a, b, f"{t}[:-1]")
+                add("loop_bound", a, b, f"reversed({t})")
+
+        # index / slice shifts
+        if isinstance(node, ast.Subscript):
+            sl = node.slice
+            if isinstance(sl, ast.Slice):
+                for part in (sl.lower, sl.upper):
+                    if part is not None and not isinstance(part, (ast.Constant, ast.UnaryOp)):
+                        s0, s1 = src.span(part)
+                        add("index_shift", s0, s1, wrapped(part) + "+1")
+                        add("index_shift", s0, s1, wrapped(part) + "-1")
+                if sl.step is not None and text(sl.step).replace(" ", "") == "-1":
+                    s0, s1 = src.span(sl.step)
+                    add("index_shift", s0, s1, "1")
+            elif isinstance(sl, (ast.Name, ast.BinOp)):
+                s0, s1 = src.span(sl)
+                add("index_shift", s0, s1, wrapped(sl) + "+1")
+                add("index_shift", s0, s1, wrapped(sl) + "-1")
+
+        # use the wrong variable
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            par = parents.get(node)
+            fn = enclosing_fn(node)
+            if fn is None or (isinstance(par, ast.Call) and par.func is node):
+                continue
+            scope = set()
+            f = fn
+            while f is not None:
+                scope |= _bound_names(f)
+                f = enclosing_fn(f)
+            if node.id in scope:
+                a, b = src.span(node)
+                for other in sorted(scope - {node.id}):
+                    if a >= offset:
+                        wrong_vars.append(("wrong_variable", f"{node.id!r} -> {other!r}",
+                                           a - offset, b - offset, other))
+    rng.shuffle(wrong_vars)
+    edits.extend(wrong_vars[:MAX_WRONG_VAR])
+    if level == "token":
+        edits = [e for e in edits if e[0] not in STATEMENT_KINDS]
+    elif level == "statement":
+        edits = [e for e in edits if e[0] in STATEMENT_KINDS]
     # dedupe
     seen, out = set(), []
     for e in edits:
@@ -220,7 +343,8 @@ def _program(row: dict, solution: str) -> str:
     return f"{row['prompt']}{solution}\n\n{row['test']}\n\ncheck({row['entry_point']})\n"
 
 
-def build(out: Path, max_per_task: int, seed: int, workers: int, include_exceptions: bool):
+def build(out: Path, max_per_task: int, seed: int, workers: int, include_exceptions: bool,
+          level: str = "all"):
     from datasets import load_dataset
 
     rows = list(load_dataset(DATASET, split="test"))
@@ -239,7 +363,7 @@ def build(out: Path, max_per_task: int, seed: int, workers: int, include_excepti
         if r["task_id"] in bad:
             continue
         sol = r["canonical_solution"]
-        for kind, desc, a, b, new in propose(sol, r["prompt"]):
+        for kind, desc, a, b, new in propose(sol, r["prompt"], random.Random(f"{seed}/{r['task_id']}"), level):
             msol = sol[:a] + new + sol[b:]
             try:
                 ast.parse(r["prompt"] + msol)
@@ -300,10 +424,12 @@ def main() -> None:
     ap.add_argument("--max-per-task", type=int, default=3)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--level", choices=["token", "statement", "all"], default="all",
+                    help="which mutation families to use (default: all)")
     ap.add_argument("--include-exceptions", action="store_true",
                     help="also keep mutants that crash/time out (default: wrong-answer only)")
     a = ap.parse_args()
-    build(a.out, a.max_per_task, a.seed, a.workers, a.include_exceptions)
+    build(a.out, a.max_per_task, a.seed, a.workers, a.include_exceptions, a.level)
 
 
 if __name__ == "__main__":
