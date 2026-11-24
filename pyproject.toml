@@ -1,0 +1,19 @@
+[project]
+name = "pbt-agents"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Aaryan Prakash", email = "38575855+fishy15@users.noreply.github.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=5.2.0",
+]
+
+[project.scripts]
+project = "project:main"
+
+[build-system]
+requires = ["uv_build>=0.13.9,<0.14.0"]
+build-backend = "uv_build"
