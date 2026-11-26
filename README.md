@@ -5,3 +5,4 @@ AI Disclosure: Most of the code and documentation in this repository was AI-gene
 ## Docs
 
 - [docs/MUTATE.md](docs/MUTATE.md): how the dataset of subtly incorrect HumanEval+ solutions is generated, and which mutation types it covers.
+- [docs/SANDBOX.md](docs/SANDBOX.md): Docker-based service for running generated code safely.
