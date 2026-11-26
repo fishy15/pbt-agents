@@ -16,6 +16,9 @@ export const meta = {
 //   implementers?:  [{ name, instructions }],      // one subagent per batch each; replaces the default roster
 //   propertySets?:  [{ name, instructions }],      // same, for property sets
 //   properties?: false | { instructions?: string }, // the properties author (one subagent per batch, writes properties from the spec alone); false disables it
+//   model?: string, effort?: string,               // default model / reasoning effort for every subagent (e.g. 'haiku', 'low'); omit to inherit the session's
+//   models?: { implementers?, propertySets?, properties?, crossCheck? }   // per-stage model override; a role's own `model` / `effort` field beats this
+//   efforts?: { same keys }                        // per-stage effort override
 //   sharedInstructions?: string,                   // appended to every subagent's prompt
 //   crossCheck?: boolean,                          // default true
 //   samples?: number,                              // inputs drawn per property set in cross-check (default 200)
@@ -173,7 +176,7 @@ function normalize(roles, defaults, kind) {
   if (!Array.isArray(list) || list.length === 0) throw new Error(`args.${kind} must be a non-empty array`)
   return list.map((r, i) => (typeof r === 'string'
     ? { name: `${kind}-${i}`, instructions: r }
-    : { name: r.name || `${kind}-${i}`, instructions: r.instructions || '' }))
+    : { name: r.name || `${kind}-${i}`, instructions: r.instructions || '', model: r.model, effort: r.effort }))
 }
 
 function chunk(xs, n) {
@@ -196,6 +199,16 @@ const batchSize = Math.max(1, Math.floor(args.batchSize || 5))
 const samples = args.samples || 200
 const sandboxCmd = args.sandboxCmd || 'uv run python -m pbt_agents.sandbox.runner'
 const shared = args.sharedInstructions ? `\n\nAdditional instructions for everyone:\n${args.sharedInstructions}` : ''
+
+// model / effort for one stage; a role's own setting wins, then args.models / args.efforts, then args.model / args.effort, else inherit
+function tier(stage, role) {
+  const o = {}
+  const model = (role && role.model) || (args.models && args.models[stage]) || args.model
+  const effort = (role && role.effort) || (args.efforts && args.efforts[stage]) || args.effort
+  if (model) o.model = model
+  if (effort) o.effort = effort
+  return o
+}
 
 const batches = chunk(args.tasks, batchSize)
 log(`${args.tasks.length} tasks in ${batches.length} batches of up to ${batchSize}; ` +
@@ -274,15 +287,15 @@ async function generate(batch, bi) {
   const ids = new Set(batch.map((t) => t.id))
   const roleTasks = [
     ...implementers.map((role) => async () => {
-      const r = await agent(implPrompt(batch, role), { label: `batch${bi}:impl:${role.name}`, phase: 'Generate', schema: IMPL_SCHEMA })
+      const r = await agent(implPrompt(batch, role), { label: `batch${bi}:impl:${role.name}`, phase: 'Generate', schema: IMPL_SCHEMA, ...tier('implementers', role) })
       return { kind: 'impl', name: role.name, results: (r && r.results) || [] }
     }),
     ...(args.properties === false ? [] : [async () => {
-      const r = await agent(propertiesPrompt(batch), { label: `batch${bi}:properties`, phase: 'Generate', schema: PROPERTIES_SCHEMA })
+      const r = await agent(propertiesPrompt(batch), { label: `batch${bi}:properties`, phase: 'Generate', schema: PROPERTIES_SCHEMA, ...tier('properties') })
       return { kind: 'properties', name: 'properties', results: (r && r.results) || [] }
     }]),
     ...propertySets.map((role) => async () => {
-      const r = await agent(propPrompt(batch, role), { label: `batch${bi}:props:${role.name}`, phase: 'Generate', schema: PROPSET_SCHEMA })
+      const r = await agent(propPrompt(batch, role), { label: `batch${bi}:props:${role.name}`, phase: 'Generate', schema: PROPSET_SCHEMA, ...tier('propertySets', role) })
       return { kind: 'props', name: role.name, results: (r && r.results) || [] }
     }),
   ]
@@ -311,7 +324,7 @@ const results = await pipeline(
     const checkable = batch.filter((t) => gen[t.id].implementations.length && gen[t.id].propertySets.length)
     let checks = {}
     if (args.crossCheck !== false && checkable.length) {
-      const r = await agent(checkPrompt(checkable, gen), { label: `batch${bi}:cross-check`, phase: 'Cross-check', schema: CHECK_SCHEMA })
+      const r = await agent(checkPrompt(checkable, gen), { label: `batch${bi}:cross-check`, phase: 'Cross-check', schema: CHECK_SCHEMA, ...tier('crossCheck') })
       for (const c of (r && r.results) || []) {
         const { id, ...rest } = c
         checks[id] = rest
