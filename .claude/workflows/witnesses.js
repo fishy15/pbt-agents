@@ -1,9 +1,9 @@
 export const meta = {
   name: 'witnesses',
-  description: 'Over a list of tasks, generate witness implementations and witness property sets (precondition + generator) with role-specific instructions, then cross-check them. Each subagent handles a batch of tasks one after another.',
+  description: 'Over a list of tasks, generate witness implementations, witness property sets (precondition + generator) and one shared set of properties to test, then cross-check the witnesses. Each subagent handles a batch of tasks one after another.',
   whenToUse: 'Producing candidate implementations and PBT property sets for many specs cheaply, where each subagent follows its own custom instructions (e.g. "write a brute-force implementation")',
   phases: [
-    { title: 'Generate', detail: 'per batch of tasks: one subagent per implementer role and per property-set role, each working through the batch sequentially' },
+    { title: 'Generate', detail: 'per batch of tasks: one subagent per implementer role, per property-set role and one for the properties, each working through the batch sequentially' },
     { title: 'Cross-check', detail: 'per batch: one subagent runs every implementation on every property set (in the sandbox) and reports problems and disagreements' },
   ],
 }
@@ -15,6 +15,7 @@ export const meta = {
 //   batchSize?: number,                            // tasks handled one-after-another by each subagent (default 5)
 //   implementers?:  [{ name, instructions }],      // one subagent per batch each; replaces the default roster
 //   propertySets?:  [{ name, instructions }],      // same, for property sets
+//   properties?: false | { instructions?: string }, // the properties author (one subagent per batch, writes properties from the spec alone); false disables it
 //   sharedInstructions?: string,                   // appended to every subagent's prompt
 //   crossCheck?: boolean,                          // default true
 //   samples?: number,                              // inputs drawn per property set in cross-check (default 200)
@@ -22,7 +23,9 @@ export const meta = {
 // }
 // A role may also be given as a bare string, used as both its name and its instructions.
 //
-// Agent count = ceil(tasks / batchSize) * (implementers + propertySets + 1).
+// Agent count = ceil(tasks / batchSize) * (implementers + propertySets + 1 properties author + 1 cross-check).
+// Each task's output has `properties`: tests written from the spec alone, shared by all witnesses, to be run against the program under test.
+// Each property is `def prop_<name>(candidate, *args)` that raises AssertionError when violated. Witnesses (implementations, property sets) are for debugging failures and voting on properties later.
 // All generated code is run through the Docker sandbox (see docs/SANDBOX.md).
 // ---------------------------------------------------------------------------
 
@@ -72,6 +75,37 @@ const PROPSET_SCHEMA = {
           notes: { type: 'string', description: 'What the property set targets and any spec ambiguity you resolved' },
         },
         required: ['id', 'precondition', 'generator'],
+      },
+    },
+  },
+  required: ['results'],
+}
+
+const PROPERTIES_SCHEMA = {
+  type: 'object',
+  properties: {
+    results: {
+      type: 'array',
+      description: 'One entry per task, in the order the tasks were given',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The task id, copied exactly' },
+          properties: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Short snake_case name' },
+                description: { type: 'string', description: 'One sentence: what must hold, and what kind of bug it catches' },
+                code: { type: 'string', description: 'Python source (with imports) defining `def prop_<name>(candidate, *args) -> None`; raises AssertionError if violated' },
+              },
+              required: ['name', 'description', 'code'],
+            },
+          },
+          notes: { type: 'string' },
+        },
+        required: ['id', 'properties'],
       },
     },
   },
@@ -165,7 +199,7 @@ const shared = args.sharedInstructions ? `\n\nAdditional instructions for everyo
 
 const batches = chunk(args.tasks, batchSize)
 log(`${args.tasks.length} tasks in ${batches.length} batches of up to ${batchSize}; ` +
-  `${batches.length * (implementers.length + propertySets.length + (args.crossCheck === false ? 0 : 1))} subagents`)
+  `${batches.length * (implementers.length + propertySets.length + (args.properties === false ? 0 : 1) + (args.crossCheck === false ? 0 : 1))} subagents`)
 
 const taskBlock = (t, i) =>
   `### Task ${i + 1}: id=${t.id}, entry point \`${t.entry_point}\`\n\`\`\`python\n${t.prompt}\n\`\`\``
@@ -202,6 +236,23 @@ function propPrompt(batch, role) {
     `a strategy that mostly produces precondition-rejected inputs is a bug in the property set.\n\n${SANDBOX}\n\n${NO_PEEKING}${shared}`
 }
 
+function propertiesPrompt(batch) {
+  const extra = (args.properties && args.properties.instructions) ? `\n\nRole instructions:\n${args.properties.instructions}` : ''
+  return `You write the properties that property-based tests will check. One shared set of properties per task will be used to test the real program, ` +
+    `so write them from the specification alone.${extra}\n\n${SEQUENTIAL}\n\n${batch.map(taskBlock).join('\n\n')}\n\n` +
+    `For each task, write 3 to 8 properties. Each is a Python function \`def prop_<name>(candidate, *args) -> None\` where \`candidate\` is the function under test and \`args\` is one valid input ` +
+    `(positional arguments, as drawn by a hypothesis strategy that already satisfies the spec's preconditions). It raises AssertionError when the property is violated and must not raise anything else on valid inputs. ` +
+    `A harness will call it as \`prop_<name>(candidate, *args)\` inside \`@given\`.\n` +
+    `Rules:\n` +
+    `- No reference implementation or oracle inside a property: do not re-solve the task and compare. Check things that must hold of the output: ` +
+    `output type and shape, relationships between input and output, invariants (ordering, membership, length, value ranges), ` +
+    `metamorphic relations (call \`candidate\` on a transformed input and relate the two outputs: permutation, concatenation, scaling, idempotence, symmetry), and any exact answers the docstring pins down.\n` +
+    `- \`candidate\` may mutate its arguments: \`copy.deepcopy\` the inputs before every call, and before using them afterwards.\n` +
+    `- Prefer properties that catch different kinds of bugs over several variants of one check. Do not make a property so strict that a correct program could violate it (watch ties, float rounding, unspecified orderings).\n` +
+    `- Before moving on, check each property in the sandbox against a throwaway implementation of your own on small hand-picked inputs, including the docstring examples, to make sure correct behaviour passes. Do not return that implementation.\n\n` +
+    `${SANDBOX}\n\n${NO_PEEKING}${shared}`
+}
+
 function checkPrompt(batch, gen) {
   const per = batch.map((t, i) => {
     const g = gen[t.id]
@@ -226,6 +277,10 @@ async function generate(batch, bi) {
       const r = await agent(implPrompt(batch, role), { label: `batch${bi}:impl:${role.name}`, phase: 'Generate', schema: IMPL_SCHEMA })
       return { kind: 'impl', name: role.name, results: (r && r.results) || [] }
     }),
+    ...(args.properties === false ? [] : [async () => {
+      const r = await agent(propertiesPrompt(batch), { label: `batch${bi}:properties`, phase: 'Generate', schema: PROPERTIES_SCHEMA })
+      return { kind: 'properties', name: 'properties', results: (r && r.results) || [] }
+    }]),
     ...propertySets.map((role) => async () => {
       const r = await agent(propPrompt(batch, role), { label: `batch${bi}:props:${role.name}`, phase: 'Generate', schema: PROPSET_SCHEMA })
       return { kind: 'props', name: role.name, results: (r && r.results) || [] }
@@ -233,14 +288,15 @@ async function generate(batch, bi) {
   ]
   const outs = (await parallel(roleTasks)).filter(Boolean)
   const gen = {}
-  for (const t of batch) gen[t.id] = { implementations: [], propertySets: [] }
+  for (const t of batch) gen[t.id] = { implementations: [], propertySets: [], properties: [] }
   for (const o of outs) {
     const seen = new Set()
     for (const res of o.results) {
       if (!ids.has(res.id) || seen.has(res.id)) continue // ignore hallucinated / duplicate ids
       seen.add(res.id)
       const { id, ...rest } = res
-      gen[id][o.kind === 'impl' ? 'implementations' : 'propertySets'].push({ name: o.name, ...rest })
+      if (o.kind === 'properties') gen[id].properties = rest.properties || []
+      else gen[id][o.kind === 'impl' ? 'implementations' : 'propertySets'].push({ name: o.name, ...rest })
     }
     const missing = batch.filter((t) => !seen.has(t.id)).map((t) => t.id)
     if (missing.length) log(`batch ${bi}: ${o.kind} role '${o.name}' returned nothing for ${missing.join(', ')}`)
