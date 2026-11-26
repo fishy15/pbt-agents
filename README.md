@@ -6,3 +6,4 @@ AI Disclosure: Most of the code and documentation in this repository was AI-gene
 
 - [docs/MUTATE.md](docs/MUTATE.md): how the dataset of subtly incorrect HumanEval+ solutions is generated, and which mutation types it covers.
 - [docs/SANDBOX.md](docs/SANDBOX.md): Docker-based service for running generated code safely.
+- `.claude/workflows/witnesses.js`: subagent workflow that generates witness implementations and witness property sets over a list of tasks.
