@@ -25,6 +25,11 @@ wrong precondition, or a wrong generator.
 
     uv run python -m pbt_agents.harness WITNESSES.json [--mutants data/humanevalplus_mutants.jsonl]
         [--out results.jsonl] [--examples 200] [--timeout 120]
+        [--tau 0.5] [--labels data/labels.json] [--votes-out votes.jsonl] [--no-ask] [--no-vote]
+
+Every distinct failing input then goes through the voting procedure in `pbt_agents.vote` (property
+set preconditions vote on validity, witnesses vote on the intended output y*, the user is asked when
+the witnesses are not decisive by `tau`). Pass --no-vote to skip it.
 
 WITNESSES.json is the workflow output: a list of
 {id, entry_point, properties: [{name, code}], propertySets: [{name, precondition, generator}],
@@ -187,6 +192,7 @@ for ps in DATA["propsets"]:
                     total += 1
                     agree += int(ck == "ok" and eq(cv, wv))
             out.append({**row, "status": "failed", "failure": kind, "message": msg, "input": short(args),
+                        "input_repr": repr(args) if len(repr(args)) <= 20000 else None,
                         "candidate_out": short(cv) if ck == "ok" else ck + ": " + cv,
                         "witnesses": witnesses, "witnesses_agree": agree, "witnesses_total": total})
 print(json.dumps(out))
@@ -285,6 +291,11 @@ def main() -> None:
     ap.add_argument("--out", help="write one JSON row per (candidate, property set, property) here")
     ap.add_argument("--examples", type=int, default=200)
     ap.add_argument("--timeout", type=float, default=120, help="sandbox timeout per candidate (seconds)")
+    ap.add_argument("--no-vote", action="store_true", help="skip the voting step on failing inputs")
+    ap.add_argument("--tau", type=float, default=0.5, help="required lead of the top witness output over the runner-up")
+    ap.add_argument("--labels", default="data/labels.json", help="saved human answers (read and updated)")
+    ap.add_argument("--votes-out", help="write one JSON record per failing input (voting result) here")
+    ap.add_argument("--no-ask", action="store_true", help="never prompt; undecided inputs stay pending")
     a = ap.parse_args()
     tasks = json.loads(Path(a.witnesses).read_text())
     mutants = [json.loads(l) for l in Path(a.mutants).read_text().splitlines() if l.strip()]
@@ -295,6 +306,24 @@ def main() -> None:
     if a.out:
         Path(a.out).write_text("".join(json.dumps(r) + "\n" for r in rows))
     print(summarize(rows))
+    if a.no_vote or not any(r["status"] == "failed" for r in rows):
+        return
+    from pbt_agents import vote as V
+    lp = Path(a.labels)
+    labels = json.loads(lp.read_text()) if lp.exists() else {}
+    try:
+        recs = V.vote(tasks, rows, mutants, a.tau, labels, interactive=not a.no_ask and sys.stdin.isatty())
+    except SandboxUnavailable as e:
+        sys.exit(f"sandbox unavailable: {e}")
+    if labels:
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.write_text(json.dumps(labels, indent=1))
+    if a.votes_out:
+        Path(a.votes_out).write_text("".join(json.dumps(r) + "\n" for r in recs))
+    print("\nvoting on failing inputs (tau=%s)\n%s" % (a.tau, V.summarize(recs)))
+    pend = [r for r in recs if r["decision"] == "pending"]
+    if pend:
+        print(f"{len(pend)} inputs need a human answer: rerun in a terminal, or add them to {a.labels}")
 
 
 if __name__ == "__main__":

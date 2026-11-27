@@ -8,3 +8,4 @@ AI Disclosure: Most of the code and documentation in this repository was AI-gene
 - [docs/SANDBOX.md](docs/SANDBOX.md): Docker-based service for running generated code safely.
 - `.claude/workflows/witnesses.js`: subagent workflow that generates witness implementations, witness property sets and one shared set of properties over a list of tasks.
 - `src/pbt_agents/harness.py`: runs the shared properties as Hypothesis tests on the canonical solution and each mutant (inside the sandbox); on a failure it runs the witnesses on the failing input to help debug.
+- `src/pbt_agents/vote.py`: for each failing input, property sets vote on whether the input is valid, witnesses vote on the intended output y* (accepted if the top output leads the runner-up by `--tau`), and otherwise the user is asked; then each failing program is labelled `bug` or `property_wrong`.
