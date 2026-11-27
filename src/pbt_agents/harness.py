@@ -26,10 +26,12 @@ wrong precondition, or a wrong generator.
     uv run python -m pbt_agents.harness WITNESSES.json [--mutants data/humanevalplus_mutants.jsonl]
         [--out results.jsonl] [--examples 200] [--timeout 120]
         [--tau 0.5] [--labels data/labels.json] [--votes-out votes.jsonl] [--no-ask] [--no-vote]
+        [--jobs-out repair_jobs.json]
 
 Every distinct failing input then goes through the voting procedure in `pbt_agents.vote` (property
 set preconditions vote on validity, witnesses vote on the intended output y*, the user is asked when
-the witnesses are not decisive by `tau`). Pass --no-vote to skip it.
+the witnesses are not decisive by `tau`). Pass --no-vote to skip it. --jobs-out also writes a repair
+job for every program voted wrong (see `pbt_agents.repair` and the `repair` workflow).
 
 WITNESSES.json is the workflow output: a list of
 {id, entry_point, properties: [{name, code}], propertySets: [{name, precondition, generator}],
@@ -295,6 +297,7 @@ def main() -> None:
     ap.add_argument("--tau", type=float, default=0.5, help="required lead of the top witness output over the runner-up")
     ap.add_argument("--labels", default="data/labels.json", help="saved human answers (read and updated)")
     ap.add_argument("--votes-out", help="write one JSON record per failing input (voting result) here")
+    ap.add_argument("--jobs-out", help="write repair jobs for programs the vote found wrong (for the repair workflow)")
     ap.add_argument("--no-ask", action="store_true", help="never prompt; undecided inputs stay pending")
     a = ap.parse_args()
     tasks = json.loads(Path(a.witnesses).read_text())
@@ -321,6 +324,12 @@ def main() -> None:
     if a.votes_out:
         Path(a.votes_out).write_text("".join(json.dumps(r) + "\n" for r in recs))
     print("\nvoting on failing inputs (tau=%s)\n%s" % (a.tau, V.summarize(recs)))
+    if a.jobs_out:
+        from pbt_agents import repair as R
+        jobs = R.make_jobs(tasks, recs, mutants)
+        Path(a.jobs_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(a.jobs_out).write_text(json.dumps(jobs, indent=1))
+        print(f"{len(jobs['jobs'])} repair jobs -> {a.jobs_out}")
     pend = [r for r in recs if r["decision"] == "pending"]
     if pend:
         print(f"{len(pend)} inputs need a human answer: rerun in a terminal, or add them to {a.labels}")
