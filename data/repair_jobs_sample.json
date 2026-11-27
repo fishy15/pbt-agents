@@ -222,6 +222,7 @@
      "witness": "straightforward",
      "got": "None",
      "failed_properties": [
+      "spec-valid/duplicate_is_close",
       "spec-valid/returns_bool"
      ]
     },
@@ -231,7 +232,36 @@
      "witness": "straightforward",
      "got": "None",
      "failed_properties": [
+      "edge-cases/duplicate_is_close",
       "edge-cases/returns_bool"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/0/mut1",
+   "task_id": "HumanEval/0",
+   "kind": "mutant",
+   "entry_point": "has_close_elements",
+   "prompt": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n",
+   "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n\n\n    sorted_numbers = sorted(numbers)\n    for i in range(len(sorted_numbers) - 1):\n        if sorted_numbers[i + 1] - sorted_numbers[i] < threshold:\n            pass\n    return False\n\n",
+   "cases": [
+    {
+     "input_repr": "([0.0, 0.0], 1.0)",
+     "expected": "True",
+     "witness": "straightforward",
+     "got": "False",
+     "failed_properties": [
+      "spec-valid/duplicate_is_close"
+     ]
+    },
+    {
+     "input_repr": "([0.0, 0.0], 0.5)",
+     "expected": "True",
+     "witness": "straightforward",
+     "got": "False",
+     "failed_properties": [
+      "edge-cases/duplicate_is_close"
      ]
     }
    ]
@@ -291,6 +321,16 @@
       "spec-valid/prepend_tie_wins",
       "spec-valid/reverse_same_length"
      ]
+    },
+    {
+     "input_repr": "(['z'],)",
+     "expected": "z",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_longer_wins",
+      "spec-valid/append_longer_wins"
+     ]
     }
    ]
   },
@@ -318,8 +358,20 @@
      "witness": "straightforward",
      "got": "",
      "failed_properties": [
+      "edge-cases/append_not_longer",
       "edge-cases/first_of_ties",
+      "spec-valid/append_not_longer",
       "spec-valid/first_of_ties"
+     ]
+    },
+    {
+     "input_repr": "(['', 'z'],)",
+     "expected": "z",
+     "witness": "straightforward",
+     "got": "",
+     "failed_properties": [
+      "edge-cases/append_longer_wins",
+      "spec-valid/append_longer_wins"
      ]
     }
    ]
@@ -351,6 +403,16 @@
       "spec-valid/prepend_tie_wins",
       "spec-valid/reverse_same_length"
      ]
+    },
+    {
+     "input_repr": "(['z'],)",
+     "expected": "z",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_longer_wins",
+      "spec-valid/append_longer_wins"
+     ]
     }
    ]
   },
@@ -369,7 +431,27 @@
      "got": "(1.0, 0.0)",
      "failed_properties": [
       "edge-cases/shape_and_order",
+      "spec-valid/permutation_same_gap",
       "spec-valid/shape_and_order"
+     ]
+    },
+    {
+     "input_repr": "([0.0, 1.0, 0.0],)",
+     "expected": "(0.0, 0.0)",
+     "witness": "straightforward",
+     "got": "(1.0, 0.0)",
+     "failed_properties": [
+      "spec-valid/duplicate_gives_equal_pair"
+     ]
+    },
+    {
+     "input_repr": "([1.0, 5.0, 10.0, 5.5],)",
+     "expected": "(5.0, 5.5)",
+     "witness": "straightforward",
+     "got": "(10.0, 5.5)",
+     "failed_properties": [
+      "edge-cases/exact_pair",
+      "spec-valid/exact_pair"
      ]
     },
     {
@@ -378,8 +460,16 @@
      "witness": "straightforward",
      "got": "(0.0, -1.0)",
      "failed_properties": [
-      "edge-cases/duplicate_gives_equal_pair",
       "edge-cases/permutation_same_gap"
+     ]
+    },
+    {
+     "input_repr": "([0.0, -1.0, 0.0],)",
+     "expected": "(0.0, 0.0)",
+     "witness": "straightforward",
+     "got": "(0.0, -1.0)",
+     "failed_properties": [
+      "edge-cases/duplicate_gives_equal_pair"
      ]
     }
    ]
@@ -393,12 +483,31 @@
    "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    \"\"\" From a supplied list of numbers (of length at least two) select and return two that are the closest to each\n    other and return them in order (smaller number, larger number).\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n\n\n    numbers.sort()\n    min_diff = float(\"inf\")\n    min_pair = None\n    for l, r in zip(numbers[:-1], numbers[2:]):\n        diff = r - l\n        if diff < min_diff:\n            min_diff = diff\n            min_pair = (l, r)\n    return min_pair\n\n",
    "cases": [
     {
-     "input_repr": "([0.0, 1.0],)",
-     "expected": "(0.0, 1.0)",
+     "input_repr": "([0.0, 1.0, 0.0],)",
+     "expected": "(0.0, 0.0)",
      "witness": "straightforward",
-     "got": "None",
+     "got": "(0.0, 1.0)",
      "failed_properties": [
       "spec-valid/duplicate_gives_equal_pair"
+     ]
+    },
+    {
+     "input_repr": "([1.0, 5.0, 10.0, 5.5],)",
+     "expected": "(5.0, 5.5)",
+     "witness": "straightforward",
+     "got": "(1.0, 5.5)",
+     "failed_properties": [
+      "edge-cases/exact_pair",
+      "spec-valid/exact_pair"
+     ]
+    },
+    {
+     "input_repr": "([0.0, -1.0, 0.0],)",
+     "expected": "(0.0, 0.0)",
+     "witness": "straightforward",
+     "got": "(-1.0, 0.0)",
+     "failed_properties": [
+      "edge-cases/duplicate_gives_equal_pair"
      ]
     },
     {
@@ -407,28 +516,20 @@
      "witness": "straightforward",
      "got": "None",
      "failed_properties": [
-      "edge-cases/exact_pair",
+      "edge-cases/adding_element_gap_not_larger",
       "edge-cases/members",
       "edge-cases/no_closer_pair",
       "edge-cases/permutation_same_gap",
       "edge-cases/shape_and_order",
-      "spec-valid/exact_pair",
+      "spec-valid/adding_element_gap_not_larger",
       "spec-valid/members",
       "spec-valid/no_closer_pair",
       "spec-valid/permutation_same_gap",
       "spec-valid/shape_and_order"
      ]
-    },
-    {
-     "input_repr": "([0.0, -1.0],)",
-     "expected": "(-1.0, 0.0)",
-     "witness": "straightforward",
-     "got": "None",
-     "failed_properties": [
-      "edge-cases/duplicate_gives_equal_pair"
-     ]
     }
    ]
   }
- ]
+ ],
+ "property_jobs": []
 }

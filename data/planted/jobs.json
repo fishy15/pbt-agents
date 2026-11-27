@@ -1,0 +1,283 @@
+{
+ "tasks": {
+  "HumanEval/12": {
+   "entry_point": "longest",
+   "propertySets": [
+    {
+     "name": "spec-valid",
+     "precondition": "def precondition(*args):\n    try:\n        return len(args) == 1 and isinstance(args[0], list) and all(isinstance(s, str) for s in args[0])\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    s = st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=10)\n    s2 = st.text(alphabet=\"ab\", max_size=4)\n    return st.tuples(st.lists(st.one_of(s, s2), max_size=8))\n",
+     "notes": "Any list of str including empty list and empty strings; small alphabet 'ab' produces frequent equal-length ties. Sandbox: 500/500 accepted."
+    },
+    {
+     "name": "edge-cases",
+     "precondition": "def precondition(*args) -> bool:\n    try:\n        return len(args) == 1 and isinstance(args[0], list) and all(isinstance(s, str) for s in args[0])\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    s = st.one_of(st.just(\"\"), st.text(max_size=5), st.text(alphabet=\"ab\", max_size=4))\n    return st.one_of(\n        st.just([]),\n        s.map(lambda x: [x]),\n        st.lists(s, max_size=8),\n        st.lists(st.text(alphabet=\"abc\", min_size=3, max_size=3), min_size=2, max_size=6),\n    ).map(lambda l: (l,))\n"
+    }
+   ],
+   "properties": [
+    {
+     "name": "empty_none",
+     "description": "None exactly when the list is empty.",
+     "code": "import copy\ndef prop_empty_none(candidate, strings):\n    r = candidate(copy.deepcopy(strings))\n    if not strings:\n        assert r is None\n    else:\n        assert r is not None\n"
+    },
+    {
+     "name": "member_and_max_len",
+     "description": "Result is a string from the input and no input string is longer.",
+     "code": "import copy\ndef prop_member_and_max_len(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        assert isinstance(r, str) and r in strings\n        assert all(len(r) >= len(s) for s in strings)\n"
+    },
+    {
+     "name": "first_of_ties",
+     "description": "Result is the earliest string with maximal length (strings before it are strictly shorter).",
+     "code": "import copy\ndef prop_first_of_ties(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        m = len(r)\n        last = max(i for i, s in enumerate(strings) if len(s) == m)\n        assert strings[last] == r\n"
+    },
+    {
+     "name": "append_not_longer",
+     "description": "Appending the result or a shorter string does not change the answer.",
+     "code": "import copy\ndef prop_append_not_longer(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        assert candidate(copy.deepcopy(strings) + [r]) == r\n        assert candidate(copy.deepcopy(strings) + [r[:-1]]) == r\n"
+    },
+    {
+     "name": "append_longer_wins",
+     "description": "A strictly longer string wins wherever it is placed.",
+     "code": "import copy\ndef prop_append_longer_wins(candidate, strings):\n    base = max((len(s) for s in strings), default=0)\n    new = 'z' * (base + 1)\n    assert candidate(copy.deepcopy(strings) + [new]) == new\n    assert candidate([new] + copy.deepcopy(strings)) == new\n"
+    },
+    {
+     "name": "prepend_tie_wins",
+     "description": "A same-length string prepended wins the tie; appended it loses.",
+     "code": "import copy\ndef prop_prepend_tie_wins(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        marker = '\\x00' * len(r)\n        assert candidate([marker] + copy.deepcopy(strings)) == marker\n        assert candidate(copy.deepcopy(strings) + [marker]) == r\n"
+    },
+    {
+     "name": "reverse_same_length",
+     "description": "Reversing the list leaves the result length unchanged.",
+     "code": "import copy\ndef prop_reverse_same_length(candidate, strings):\n    if strings:\n        a = candidate(copy.deepcopy(strings))\n        b = candidate(copy.deepcopy(strings)[::-1])\n        assert len(a) == len(b)\n"
+    }
+   ],
+   "implementations": [
+    {
+     "name": "straightforward",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    best = None\n    for s in strings:\n        if best is None or len(s) > len(best):\n            best = s\n    return best\n",
+     "notes": "Strict > keeps the first of equal-length strings; None for empty list. Docstring examples passed."
+    },
+    {
+     "name": "brute-force",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    best = None\n    for s in strings:\n        if best is None or len(s) > len(best):\n            best = s\n    return best\n",
+     "notes": "Strict '>' keeps the first of equal-length strings; empty list returns None. Docstring examples pass in sandbox."
+    },
+    {
+     "name": "optimized",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    return max(strings, key=len) if strings else None\n",
+     "notes": "max returns the first maximal element, matching the tie rule. Docstring examples passed in sandbox."
+    }
+   ]
+  }
+ },
+ "jobs": [
+  {
+   "id": "HumanEval/12/mut0",
+   "task_id": "HumanEval/12",
+   "kind": "mutant",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return None\n\n",
+   "cases": [
+    {
+     "input_repr": "([''],)",
+     "expected": "",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_not_longer",
+      "edge-cases/empty_none",
+      "edge-cases/first_of_ties",
+      "edge-cases/member_and_max_len",
+      "edge-cases/prepend_tie_wins",
+      "edge-cases/reverse_same_length",
+      "spec-valid/append_not_longer",
+      "spec-valid/empty_none",
+      "spec-valid/first_of_ties",
+      "spec-valid/member_and_max_len",
+      "spec-valid/prepend_tie_wins",
+      "spec-valid/reverse_same_length"
+     ]
+    },
+    {
+     "input_repr": "(['z'],)",
+     "expected": "z",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_longer_wins",
+      "spec-valid/append_longer_wins"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/12/mut1",
+   "task_id": "HumanEval/12",
+   "kind": "mutant",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = min(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return s\n\n",
+   "cases": [
+    {
+     "input_repr": "(['', '0'],)",
+     "expected": "0",
+     "witness": "straightforward",
+     "got": "",
+     "failed_properties": [
+      "edge-cases/member_and_max_len",
+      "spec-valid/member_and_max_len"
+     ]
+    },
+    {
+     "input_repr": "(['0', ''],)",
+     "expected": "0",
+     "witness": "straightforward",
+     "got": "",
+     "failed_properties": [
+      "edge-cases/append_not_longer",
+      "spec-valid/append_not_longer"
+     ]
+    },
+    {
+     "input_repr": "(['', 'z'],)",
+     "expected": "z",
+     "witness": "straightforward",
+     "got": "",
+     "failed_properties": [
+      "edge-cases/append_longer_wins",
+      "spec-valid/append_longer_wins"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/12/mut2",
+   "task_id": "HumanEval/12",
+   "kind": "mutant",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        pass\n\n",
+   "cases": [
+    {
+     "input_repr": "([''],)",
+     "expected": "",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_not_longer",
+      "edge-cases/empty_none",
+      "edge-cases/first_of_ties",
+      "edge-cases/member_and_max_len",
+      "edge-cases/prepend_tie_wins",
+      "edge-cases/reverse_same_length",
+      "spec-valid/append_not_longer",
+      "spec-valid/empty_none",
+      "spec-valid/first_of_ties",
+      "spec-valid/member_and_max_len",
+      "spec-valid/prepend_tie_wins",
+      "spec-valid/reverse_same_length"
+     ]
+    },
+    {
+     "input_repr": "(['z'],)",
+     "expected": "z",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_longer_wins",
+      "spec-valid/append_longer_wins"
+     ]
+    }
+   ]
+  }
+ ],
+ "property_jobs": [
+  {
+   "id": "HumanEval/12::first_of_ties",
+   "target": "property",
+   "task_id": "HumanEval/12",
+   "property": "first_of_ties",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "import copy\ndef prop_first_of_ties(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        m = len(r)\n        last = max(i for i, s in enumerate(strings) if len(s) == m)\n        assert strings[last] == r\n",
+   "cases": [
+    {
+     "input_repr": "(['0', '1'],)",
+     "witness": "brute-force",
+     "program": "HumanEval/12",
+     "propset": "spec-valid",
+     "calls": [
+      {
+       "call": "(['0', '1'],)",
+       "expected": "0",
+       "program_output": "0"
+      }
+     ]
+    },
+    {
+     "input_repr": "(['aaa', 'aab'],)",
+     "witness": "brute-force",
+     "program": "HumanEval/12",
+     "propset": "edge-cases",
+     "calls": [
+      {
+       "call": "(['aaa', 'aab'],)",
+       "expected": "aaa",
+       "program_output": "aaa"
+      }
+     ]
+    },
+    {
+     "input_repr": "(['0', '1'],)",
+     "witness": "brute-force",
+     "program": "HumanEval/12/mut1",
+     "propset": "spec-valid",
+     "calls": [
+      {
+       "call": "(['0', '1'],)",
+       "expected": "0",
+       "program_output": "0"
+      }
+     ]
+    },
+    {
+     "input_repr": "(['aaa', 'aab'],)",
+     "witness": "brute-force",
+     "program": "HumanEval/12/mut1",
+     "propset": "edge-cases",
+     "calls": [
+      {
+       "call": "(['aaa', 'aab'],)",
+       "expected": "aaa",
+       "program_output": "aaa"
+      }
+     ]
+    }
+   ],
+   "must_still_fail": [
+    {
+     "id": "HumanEval/12/mut0",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return None\n\n",
+     "input_repr": "([''],)"
+    },
+    {
+     "id": "HumanEval/12/mut0",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return None\n\n",
+     "input_repr": "([''],)"
+    },
+    {
+     "id": "HumanEval/12/mut2",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        pass\n\n",
+     "input_repr": "([''],)"
+    },
+    {
+     "id": "HumanEval/12/mut2",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        pass\n\n",
+     "input_repr": "([''],)"
+    }
+   ]
+  }
+ ]
+}

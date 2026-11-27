@@ -5,6 +5,12 @@ intended output y*. This module turns those labels into repair jobs, checks prop
 sandbox, and scores finished repairs. The repair itself is done by subagents (the `repair` workflow,
 `.claude/workflows/repair.js`), which call `show` and `check` below.
 
+Two kinds of repair, depending on the vote's verdict:
+
+  bug             the program's output differs from y*      -> repair the program (jobs["jobs"])
+  property_wrong  the program's output equals y*, yet a     -> repair the property (jobs["property_jobs"])
+                  property rejected it
+
 Only mutants are repaired (a canonical solution voted wrong gets no job; the private canonical
 solutions are never put in a job); the witnesses are not touched. A repair is judged only from the spec, the confirmed cases and the shared
 properties. The canonical solution is never shown to the repair agent. `evaluate` uses it afterwards,
@@ -150,6 +156,58 @@ for ps in DATA["propsets"]:
 print(json.dumps({"checked": checked, "mismatches": bad}))
 '''
 
+# Does the fixed property accept the confirmed correct outputs and still reject the confirmed bugs?
+_PROP_CHECK = _PRELUDE + r'''
+ns = load(DATA["code"])
+fn = ns.get("prop_" + DATA["name"])
+if fn is None:
+    found = [v for k, v in ns.items() if k.startswith("prop_") and callable(v)]
+    fn = found[0] if len(found) == 1 else None
+if not callable(fn):
+    print(json.dumps({"error": "no function prop_" + DATA["name"]})); sys.exit(0)
+
+def run_prop(cand, args):
+    """-> None if the property holds, else a short description of how it failed."""
+    def timed(*a):
+        signal.setitimer(signal.ITIMER_REAL, T)
+        try:
+            return cand(*copy.deepcopy(a))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+    try:
+        fn(timed, *copy.deepcopy(args))
+        return None
+    except AssertionError as e:
+        return "assertion: " + short(str(e) or "AssertionError", 200)
+    except CallTimeout as e:
+        return "timeout: " + str(e)
+    except Exception as e:
+        return "exception: " + repr(e)[:200]
+
+wits = {}
+for w in DATA["witnesses"]:
+    try:
+        wits[w["name"]] = load(w["code"])[EP]
+    except BaseException:
+        pass
+cases, regress = [], []
+for c in DATA["cases"]:
+    try:
+        args = parse(c["input_repr"])
+        msg = run_prop(wits[c["witness"]], args) if c["witness"] in wits else "witness missing"
+    except BaseException as e:
+        msg = "could not run: %r" % (e,)
+    cases.append({"ok": msg is None, "msg": msg})
+for m in DATA["must_fail"]:
+    try:
+        args = parse(m["input_repr"])
+        msg = run_prop(load(m["code"])[EP], args)
+    except BaseException as e:
+        msg = "could not run: %r" % (e,)
+    regress.append({"id": m["id"], "caught": msg is not None})
+print(json.dumps({"cases": cases, "regress": regress}))
+'''
+
 
 def _data(script: str, data: dict) -> str:
     return script.replace("__DATA__", repr(json.dumps(data)))
@@ -185,17 +243,57 @@ def make_jobs(tasks: list[dict], votes: list[dict], mutants: list[dict]) -> dict
                                       "prompt": prompt, "code": code, "cases": []})
             j["cases"].append({"input_repr": v["input_repr"], "expected": ys, "witness": members[0],
                                "got": vd["output"], "failed_properties": vd["properties"]})
-    used = {j["task_id"] for j in jobs.values()}
+    pjobs = _property_jobs(tmap, votes, info)
+    used = {j["task_id"] for j in jobs.values()} | {j["task_id"] for j in pjobs}
     keep = ("entry_point", "propertySets", "properties", "implementations")
     return {"tasks": {t: {k: tmap[t].get(k) or [] for k in keep} for t in sorted(used)},
-            "jobs": sorted(jobs.values(), key=lambda j: j["id"])}
+            "jobs": sorted(jobs.values(), key=lambda j: j["id"]),
+            "property_jobs": sorted(pjobs, key=lambda j: j["id"])}
+
+
+def _property_jobs(tmap: dict, votes: list[dict], info: dict) -> list[dict]:
+    """One job per property that raised on a run in which the program was right on every call it received."""
+    calls = {(v["task_id"], v["input_repr"]): v for v in votes if v.get("type", "call") == "call" and v.get("y_star") is not None}
+    cases, bugs = defaultdict(list), defaultdict(list)
+    for r in votes:
+        if r.get("type") != "row" or r["task_id"] not in tmap or not r.get("input_repr"):
+            continue
+        key = (r["task_id"], r["property"])
+        if r["verdict"] == "bug" and r["candidate"] in info:
+            bugs[key].append({"id": r["candidate"], "code": info[r["candidate"]][2], "input_repr": r["input_repr"]})
+        elif r["verdict"] == "property_wrong":
+            cs, common = [], None
+            for c in r["calls"]:
+                v = next((calls[k] for k in calls if k[0] == r["task_id"] and k[1][:300] == c["input"]), None)
+                if v is None:
+                    continue
+                members = set(v["witness_outputs"].get(v["y_star"], []))
+                common = members if common is None else common & members
+                cs.append({"call": v["input_repr"], "expected": v["y_star"],
+                           "program_output": v["verdicts"][r["candidate"]]["output"]})
+            if cs and common is not None:
+                # a witness that gave the agreed output on every call the property made
+                cases[key].append({"input_repr": r["input_repr"], "witness": sorted(common)[0] if common else None,
+                                   "program": r["candidate"], "propset": r["propset"], "calls": cs})
+    out = []
+    for (tid, prop), cs in cases.items():
+        cs = [c for c in cs if c["witness"]]
+        cur = next((p for p in tmap[tid].get("properties") or [] if p["name"] == prop), None)
+        if cur is None or not cs:
+            continue
+        prompt = next((i[0] for k, i in info.items() if k.startswith(tid + "/mut")), "")
+        out.append({"id": f"{tid}::{prop}", "target": "property", "task_id": tid, "property": prop,
+                    "entry_point": tmap[tid]["entry_point"], "prompt": prompt, "code": cur["code"],
+                    "cases": cs, "must_still_fail": bugs.get((tid, prop), [])})
+    return out
 
 
 def _job(jobs: dict, cid: str) -> dict:
-    for j in jobs["jobs"]:
+    every = jobs["jobs"] + jobs.get("property_jobs", [])
+    for j in every:
         if j["id"] == cid:
             return j
-    sys.exit(f"no repair job {cid!r}; jobs: {', '.join(j['id'] for j in jobs['jobs'])}")
+    sys.exit(f"no repair job {cid!r}; jobs: {', '.join(j['id'] for j in every)}")
 
 
 def show(job: dict) -> str:
@@ -251,6 +349,67 @@ def format_check(job: dict, r: dict) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- property repair
+
+def show_property(job: dict) -> str:
+    lines = [f"# property {job['property']} of {job['task_id']} (entry point {job['entry_point']})", "",
+             "## Spec", job["prompt"].rstrip(), "", "## Current property (shared by all programs; written from the spec alone)",
+             job["code"].rstrip(), "",
+             f"## {len(job['cases'])} run(s) on which the property rejects a program that behaved correctly",
+             "On each run the property called the program one or more times; every call returned the output the witnesses (or the user) agreed on, yet the property raised."]
+    for i, c in enumerate(job["cases"]):
+        lines.append(f"[{i}] property arguments = {c['input_repr'][:600]}   (property set {c['propset']})")
+        for k in c["calls"]:
+            lines.append(f"      the property called the program on {k['call'][:300]}")
+            lines.append(f"        correct output (witnesses/user agree): {k['expected']}   program {c['program']} returned: {k['program_output']}")
+    lines += ["", f"## {len(job['must_still_fail'])} real bug(s) the fixed property must still reject"]
+    for m in job["must_still_fail"]:
+        lines.append(f"  {m['id']} on input {m['input_repr'][:300]}")
+    return "\n".join(lines)
+
+
+def check_property(job: dict, task: dict, code: str, examples: int = 100, timeout: float = 120) -> dict:
+    """-> {"cases": [...], "regress": [...], "witness_failures": [...], "ok", "clean"}"""
+    data = {"entry_point": job["entry_point"], "name": job["property"], "code": code, "call_timeout": 2.0,
+            "cases": job["cases"], "must_fail": job["must_still_fail"],
+            "witnesses": [{"name": w["name"], "code": w["code"]} for w in task["implementations"]]}
+    res = run_code(_data(_PROP_CHECK, data), timeout=timeout)
+    out = _last_json(res)
+    if not isinstance(out, dict) or "cases" not in out:
+        detail = (out or {}).get("error") if isinstance(out, dict) else None
+        detail = detail or (res["stderr"] or res["stdout"]).strip()[-300:] or f"exit {res['exit_code']}"
+        return {"cases": [{"ok": False, "msg": detail}] * max(1, len(job["cases"])), "regress": [], "witness_failures": [],
+                "ok": False, "clean": False}
+    fails = []
+    for w in task["implementations"]:
+        rows = harness.check_candidate(w["code"], job["entry_point"], task["propertySets"],
+                                       [{"name": job["property"], "code": code}], [], examples, timeout)
+        fails += [{"witness": w["name"], **r} for r in rows if r["status"] in ("failed", "error")]
+    ok = all(c["ok"] for c in out["cases"]) and all(m["caught"] for m in out["regress"])
+    return {**out, "witness_failures": fails, "ok": ok, "clean": ok and not fails}
+
+
+def format_property_check(job: dict, r: dict) -> str:
+    n = len(r["cases"])
+    lines = [f"correct outputs now accepted: {sum(c['ok'] for c in r['cases'])}/{n}"]
+    for i, c in enumerate(r["cases"]):
+        if not c["ok"]:
+            lines.append(f"  [{i}] property still rejects the correct output: {c['msg']}")
+    lines.append(f"real bugs still rejected: {sum(m['caught'] for m in r['regress'])}/{len(r['regress'])}")
+    for m in r["regress"]:
+        if not m["caught"]:
+            lines.append(f"  {m['id']}: the property no longer notices this bug")
+    lines.append(f"witness implementations failing the property on generated inputs: {len(r['witness_failures'])}")
+    for f in r["witness_failures"][:5]:
+        lines.append(f"  {f['witness']} {f['propset']} [{f.get('failure', f.get('status'))}] input={str(f.get('input', ''))[:200]} "
+                     f"{f.get('message') or f.get('detail', '')}")
+    if r["witness_failures"]:
+        lines.append("  (witnesses are not oracles; but if several fail, the property may still be too strict)")
+    lines.append("RESULT: " + (("property accepts every confirmed correct output and still rejects every confirmed bug"
+                               + ("" if r["clean"] else ", but see the witness failures")) if r["ok"] else "not fixed yet"))
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- evaluation
 
 def agrees_with_canonical(code: str, reference: str, task: dict, entry_point: str, examples: int = 200, timeout: float = 180) -> dict:
@@ -263,15 +422,43 @@ def agrees_with_canonical(code: str, reference: str, task: dict, entry_point: st
 
 def evaluate(jobs: dict, repairs: list[dict], mutants: list[dict], workers: int = MAX_CONCURRENT) -> list[dict]:
     canon = private.load_canonical()
-    by_id = {j["id"]: j for j in jobs["jobs"]}
+    by_id = {j["id"]: j for j in jobs["jobs"] + jobs.get("property_jobs", [])}
+    by_task = defaultdict(list)
+    for m in mutants:
+        by_task[m["task_id"]].append(m)
+
+    def one_property(job, task, rep):
+        r = check_property(job, task, rep["code"])
+        rec = {"id": job["id"], "task_id": job["task_id"], "target": "property", "cases_fixed": sum(c["ok"] for c in r["cases"]),
+               "cases_total": len(r["cases"]), "bugs_still_caught": sum(m["caught"] for m in r["regress"]),
+               "bugs_total": len(r["regress"]), "witness_failures": len(r["witness_failures"]),
+               "code": rep["code"], "notes": rep.get("notes", "")}
+        pr = [{"name": job["property"], "code": rep["code"]}]
+        old = [{"name": job["property"], "code": job["code"]}]
+
+        def failing(src, props):
+            rows = harness.check_candidate(src, job["entry_point"], task["propertySets"], props, [], 100, 120)
+            return [x for x in rows if x["status"] == "failed"]
+        if job["task_id"] in canon:   # held out: the original solution must satisfy the property
+            bad = failing(canon[job["task_id"]], pr)
+            rec["canonical_failures"] = [f"{x['propset']}: input={x['input'][:150]} program={x['candidate_out']}" for x in bad[:3]]
+        mut = by_task.get(job["task_id"], [])
+        rec["mutants_caught_before"] = sum(bool(failing(m["prompt"] + m["mutated_solution"], old)) for m in mut)
+        rec["mutants_caught_after"] = sum(bool(failing(m["prompt"] + m["mutated_solution"], pr)) for m in mut)
+        rec["mutants_total"] = len(mut)
+        rec["verdict"] = ("repaired" if r["ok"] and not rec.get("canonical_failures")
+                          else "plausible_only" if r["ok"] else "failed")
+        return rec
 
     def one(rep):
         job = by_id.get(rep.get("id"))
         if job is None or not rep.get("code"):
             return {"id": rep.get("id"), "verdict": "invalid"}
         task = jobs["tasks"][job["task_id"]]
+        if job.get("target") == "property":
+            return one_property(job, task, rep)
         r = check(job, task, rep["code"])
-        rec = {"id": job["id"], "task_id": job["task_id"], "kind": job["kind"], "cases_fixed": r["cases_ok"],
+        rec = {"id": job["id"], "task_id": job["task_id"], "target": "program", "kind": job["kind"], "cases_fixed": r["cases_ok"],
                "cases_total": len(r["cases"]), "props_failing": sorted({f"{p['propset']}/{p['property']}" for p in r["props_failed"]}),
                "code": rep["code"], "notes": rep.get("notes", "")}
         if job["kind"] == "mutant" and job["task_id"] in canon:
@@ -290,12 +477,18 @@ def summarize(recs: list[dict]) -> str:
     for r in recs:
         by[r["verdict"]].append(r["id"])
     lines = [f"repairs scored: {len(recs)}"]
-    names = {"repaired": "fixes every confirmed case and agrees with the canonical solution",
-             "plausible_only": "fixes every confirmed case but differs from the canonical solution elsewhere",
-             "failed": "still wrong on a confirmed case", "invalid": "unknown id or no code"}
+    names = {"repaired": "program: fixes every confirmed case and agrees with the canonical solution; "
+                         "property: accepts the correct outputs, still rejects the bugs, canonical passes it",
+             "plausible_only": "passes the confirmed checks but not the held-out canonical comparison",
+             "failed": "fails a confirmed check", "invalid": "unknown id or no code"}
     for k in ("repaired", "plausible_only", "failed", "invalid"):
         if by.get(k):
             lines.append(f"  {k} ({names[k]}): {len(by[k])}: {', '.join(sorted(by[k])[:10])}")
+    props = [r for r in recs if r.get("target") == "property"]
+    if props:
+        lines.append(f"  properties: mutants caught before -> after the repair: "
+                     f"{sum(r['mutants_caught_before'] for r in props)} -> {sum(r['mutants_caught_after'] for r in props)} "
+                     f"of {sum(r['mutants_total'] for r in props)} (counted per property)")
     return "\n".join(lines)
 
 
@@ -324,16 +517,23 @@ def main() -> None:
         jobs = make_jobs(json.loads(Path(a.witnesses).read_text()), lines(a.votes), lines(a.mutants))
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(jobs, indent=1))
-        print(f"{len(jobs['jobs'])} repair jobs ({sum(len(j['cases']) for j in jobs['jobs'])} confirmed cases) -> {a.out}")
+        print(f"{len(jobs['jobs'])} program repair jobs ({sum(len(j['cases']) for j in jobs['jobs'])} confirmed cases), "
+              f"{len(jobs['property_jobs'])} property repair jobs -> {a.out}")
         return
     jobs = json.loads(Path(a.jobs).read_text())
     try:
         if a.cmd == "show":
-            print(show(_job(jobs, a.id)))
+            job = _job(jobs, a.id)
+            print(show_property(job) if job.get("target") == "property" else show(job))
         elif a.cmd == "check":
             job = _job(jobs, a.id)
-            r = check(job, jobs["tasks"][job["task_id"]], Path(a.code).read_text(), a.examples)
-            print(format_check(job, r))
+            task, code = jobs["tasks"][job["task_id"]], Path(a.code).read_text()
+            if job.get("target") == "property":
+                r = check_property(job, task, code, a.examples)
+                print(format_property_check(job, r))
+            else:
+                r = check(job, task, code, a.examples)
+                print(format_check(job, r))
             sys.exit(0 if r["ok"] else 1)
         else:
             reps = json.loads(Path(a.repairs).read_text())

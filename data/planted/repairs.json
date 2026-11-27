@@ -1,0 +1,16 @@
+[
+ {
+  "id": "HumanEval/12/mut1",
+  "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return s\n",
+  "fixed": true,
+  "rounds": 1,
+  "notes": "The defect was `min` used to compute the maximum length; changed it to `max`, which is the only edit. All 3 confirmed cases now pass. The two remaining property failures (first_of_ties) are property bugs: the spec says return the first of tied strings, and the program does that (e.g. ['0','1'] -> '0', ['aaa','aab'] -> 'aaa'), so they were ignored."
+ },
+ {
+  "id": "HumanEval/12::first_of_ties",
+  "code": "import copy\ndef prop_first_of_ties(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        m = len(r)\n        first = min(i for i, s in enumerate(strings) if len(s) == m)\n        assert strings[first] == r\n",
+  "fixed": true,
+  "rounds": 1,
+  "notes": "The property took the last index of the maximum-length string (max over indices), but the spec says to return the first of tied longest strings. Changed it to min(...) so it expects the first index. One check run: all 4 correct outputs accepted, all 4 real bugs still rejected, 0 witness failures. The fixed file is at /private/tmp/claude-501/-Users-aaryan-school-fall2026-cs593-project/b9a90304-b0ed-48f5-9399-6a6448383518/scratchpad/fixed_first_of_ties.py."
+ }
+]

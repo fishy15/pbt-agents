@@ -13,9 +13,12 @@ For every distinct failing input found by the harness (per task):
    Without a terminal the questions are printed and left "pending" (put answers in the labels file
    and rerun).
 
-Afterwards each failing candidate is compared with y*: if its output equals y* the program is right
-on that input and the property is the likelier culprit ("property_wrong"); otherwise the program is
-wrong ("bug"). "dismissed" means the input was invalid, "pending"/"unresolved" mean no y*.
+The inputs voted on are the *calls* the failing property run made to the program, not the property's
+own arguments (a metamorphic property calls the program on inputs derived from them). Every call of a
+failing property run is judged, then the run gets one verdict: "bug" if some call returned something
+other than y* (the program is wrong), "property_wrong" if every call was valid and returned y* yet the
+property raised (the property is wrong), "dismissed" if a call was an invalid input (the property built
+one), "unresolved" if some call has no y* (pending a human answer).
 
     uv run python -m pbt_agents.vote WITNESSES.json HARNESS_ROWS.jsonl [--tau 0.5]
         [--mutants data/humanevalplus_mutants.jsonl] [--labels data/labels.json] [--out votes.jsonl]
@@ -184,13 +187,15 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
         prompt_of[m["task_id"]] = m["prompt"]
         src[m["id"]] = m["prompt"] + m["mutated_solution"]
 
+    # The unit voted on is a *call*: an input the program was actually run on inside the failing property run
+    # (a metamorphic property calls the program on inputs it derives from its own arguments).
     inputs = defaultdict(lambda: {"cands": set(), "props": defaultdict(set)})
-    for r in rows:
-        if r["status"] != "failed" or not r.get("input_repr"):
-            continue
-        e = inputs[(r["task_id"], r["input_repr"])]
-        e["cands"].add(r["candidate"])
-        e["props"][r["candidate"]].add(f"{r['propset']}/{r['property']}")
+    failed = [r for r in rows if r["status"] == "failed" and (r.get("calls") or r.get("input_repr"))]
+    for r in failed:
+        for rep in _calls(r):
+            e = inputs[(r["task_id"], rep)]
+            e["cands"].add(r["candidate"])
+            e["props"][r["candidate"]].add(f"{r['propset']}/{r['property']}")
 
     def probe(item):
         (tid, rep), e = item
@@ -214,7 +219,7 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
     out = []
     for (item, info) in probed:
         (tid, rep), e = item
-        rec = {"task_id": tid, "input": rep[:300], "input_repr": rep, "tau": tau,
+        rec = {"type": "call", "task_id": tid, "input": rep[:300], "input_repr": rep, "tau": tau,
                "candidates": sorted(e["cands"])}
         if info is None:
             out.append({**rec, "decision": "error", "y_star": None}); continue
@@ -247,28 +252,52 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
                 v = "unresolved"
             else:
                 gi = next((i for i, g in enumerate(info["groups"]) if g["repr"] == y), None)
-                v = "property_wrong" if gi is not None and c["group"] == gi else "bug"
+                v = "agrees" if gi is not None and c["group"] == gi else "bug"
             verdicts[c["id"]] = {"verdict": v, "output": c["repr"], "properties": sorted(e["props"][c["id"]])}
         rec["verdicts"] = verdicts
         out.append(rec)
+    # One verdict per failing property run, from the verdicts of the calls it made:
+    #   bug             some call returned something other than y*            -> the program is wrong
+    #   unresolved      no bug found but some call has no y*
+    #   dismissed       no bug found but some call was an invalid input        -> the property built an invalid input
+    #   property_wrong  every call was valid and returned y*, yet the property raised -> the property is wrong
+    by_call = {(r["task_id"], r["input_repr"]): r for r in out if r.get("verdicts")}
+    for r in failed:
+        if r["task_id"] not in tmap:
+            continue
+        calls = []
+        for rep in _calls(r):
+            v = (by_call.get((r["task_id"], rep)) or {}).get("verdicts", {}).get(r["candidate"])
+            calls.append({"input": rep[:300], "verdict": v["verdict"] if v else "unresolved"})
+        kinds = {c["verdict"] for c in calls}
+        verdict = ("bug" if "bug" in kinds else "unresolved" if "unresolved" in kinds or not kinds
+                   else "dismissed" if "dismissed" in kinds else "property_wrong")
+        out.append({"type": "row", "task_id": r["task_id"], "candidate": r["candidate"], "propset": r["propset"],
+                    "property": r["property"], "input_repr": r.get("input_repr"), "verdict": verdict, "calls": calls})
     return out
 
 
+def _calls(row: dict) -> list[str]:
+    """The program inputs of a failing row (rows from before call logging fall back to the property's arguments)."""
+    return list(dict.fromkeys(row.get("calls") or ([row["input_repr"]] if row.get("input_repr") else [])))
+
+
 def summarize(recs: list[dict]) -> str:
-    lines = [f"distinct failing inputs: {len(recs)}"]
+    calls = [r for r in recs if r.get("type", "call") == "call"]
+    rows = [r for r in recs if r.get("type") == "row"]
+    lines = [f"distinct failing calls (program inputs): {len(calls)}"]
     by = defaultdict(int)
-    for r in recs:
+    for r in calls:
         by[r["decision"]] += 1
     lines.append("decisions: " + ", ".join(f"{k}={v}" for k, v in sorted(by.items())))
-    vs = defaultdict(set)
-    for r in recs:
-        for c, v in r.get("verdicts", {}).items():
-            vs[v["verdict"]].add(c)
+    lines.append(f"failing property runs: {len(rows)}")
     for k in ("bug", "property_wrong", "dismissed", "unresolved"):
-        if vs.get(k):
-            lines.append(f"  {k}: {len(vs[k])} candidates, e.g. {', '.join(sorted(vs[k])[:8])}")
-    both = vs.get("bug", set())
-    lines.append(f"candidates with a confirmed bug: {len(both)}")
+        sel = [r for r in rows if r["verdict"] == k]
+        if sel:
+            names = sorted({r["candidate"] if k == "bug" else f"{r['task_id']}::{r['property']}" for r in sel})
+            what = "programs" if k == "bug" else "properties" if k == "property_wrong" else "candidate/property pairs"
+            lines.append(f"  {k}: {len(sel)} runs; {len(names)} {what}, e.g. {', '.join(names[:8])}")
+    lines.append(f"candidates with a confirmed bug: {len({r['candidate'] for r in rows if r['verdict'] == 'bug'})}")
     return "\n".join(lines)
 
 

@@ -8,7 +8,9 @@ properties written from the spec. For every (property set, property) pair one Hy
         assume(precondition(*args))
         prop_<name>(candidate, *args)      # raises on violation
 
-`candidate` calls deep-copy their arguments. Witness implementations are not oracles and play no
+`candidate` calls deep-copy their arguments. A failed row records `input_repr` (the property's arguments)
+and `calls` (the arguments of every call the property made to the program in the failing run; a
+metamorphic property calls the program on inputs derived from its own arguments). Witness implementations are not oracles and play no
 part in pass/fail. After a failure they are run on the (shrunk) failing input, so the report shows
 what the program returned next to what each witness returns. If the witnesses agree with the
 program, the property is the likelier culprit; if they disagree, the program is.
@@ -153,6 +155,13 @@ for ps in DATA["propsets"]:
         if isinstance(fn, str):
             out.append(err(ps["name"], name, fn)); continue
         st = {"valid": 0, "total": 0, "bad": None}
+        calls = []   # reprs of the arguments of every call the property made to the program in the current run
+
+        def logged(*a):
+            if len(calls) < 12:
+                r = repr(a)
+                calls.append(r if len(r) <= 20000 else None)
+            return cand(*a)
 
         @settings(max_examples=EXAMPLES, deadline=None, database=None, derandomize=True,
                   suppress_health_check=list(HealthCheck))
@@ -165,16 +174,17 @@ for ps in DATA["propsets"]:
                 ok = False
             assume(ok)
             st["valid"] += 1
+            del calls[:]
             try:
-                fn(cand, *copy.deepcopy(args))
+                fn(logged, *copy.deepcopy(args))
             except AssertionError as e:
-                st["bad"] = (args, "assertion", short(str(e) or "AssertionError", 200))
+                st["bad"] = (args, "assertion", short(str(e) or "AssertionError", 200), list(calls))
                 raise
             except CallTimeout as e:
-                st["bad"] = (args, "timeout", str(e))
+                st["bad"] = (args, "timeout", str(e), list(calls))
                 raise
             except Exception as e:
-                st["bad"] = (args, "exception", repr(e)[:200])
+                st["bad"] = (args, "exception", repr(e)[:200], list(calls))
                 raise
 
         try:
@@ -183,7 +193,7 @@ for ps in DATA["propsets"]:
         except BaseException as e:
             if st["bad"] is None:
                 out.append({**row, "status": "error", "detail": short("test harness failure: %r" % (e,))}); continue
-            args, kind, msg = st["bad"]
+            args, kind, msg, made = st["bad"]
             ck, cv = outcome(raw, args)
             witnesses, agree, total = {}, 0, 0
             for wn, wf in wits:
@@ -196,6 +206,7 @@ for ps in DATA["propsets"]:
                     agree += int(ck == "ok" and eq(cv, wv))
             out.append({**row, "status": "failed", "failure": kind, "message": msg, "input": short(args),
                         "input_repr": repr(args) if len(repr(args)) <= 20000 else None,
+                        "calls": [c for c in made if c],
                         "candidate_out": short(cv) if ck == "ok" else ck + ": " + cv,
                         "witnesses": witnesses, "witnesses_agree": agree, "witnesses_total": total})
 print(json.dumps(out))
