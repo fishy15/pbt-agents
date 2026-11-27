@@ -10,6 +10,9 @@ Two kinds of repair, depending on the vote's verdict:
   bug             the program's output differs from y*      -> repair the program (jobs["jobs"])
   property_wrong  the program's output equals y*, yet a     -> repair the property (jobs["property_jobs"])
                   property rejected it
+  generator_wrong the input the property set generated was  -> repair the property set (jobs["generator_jobs"]):
+                  outside the spec (most property sets'        tighten the precondition, fix the generator
+                  preconditions reject it)
 
 Only mutants are repaired (a canonical solution voted wrong gets no job; the private canonical
 solutions are never put in a job); the witnesses are not touched. A repair is judged only from the spec, the confirmed cases and the shared
@@ -208,6 +211,67 @@ for m in DATA["must_fail"]:
 print(json.dumps({"cases": cases, "regress": regress}))
 '''
 
+# Does the fixed property set reject the confirmed invalid inputs, stop generating invalid ones, and still accept valid ones?
+_GEN_CHECK = _PRELUDE + r'''
+from hypothesis import HealthCheck, given, settings
+
+def mk(pre_src, gen_src):
+    ns = {"__name__": "props"}
+    exec(pre_src, ns); exec(gen_src, ns)
+    return ns["precondition"], ns["strategy"]()
+
+def accepts(pre, args):
+    try:
+        return bool(pre(*copy.deepcopy(args)))
+    except BaseException:
+        return False
+
+def draw(strat, n):
+    got = []
+    @settings(max_examples=n, deadline=None, database=None, derandomize=True, suppress_health_check=list(HealthCheck))
+    @given(strat)
+    def t(args):
+        got.append(args)
+    try:
+        t()
+    except BaseException:
+        pass
+    return got
+
+try:
+    fpre, fstrat = mk(DATA["precondition"], DATA["generator"])
+except BaseException as e:
+    print(json.dumps({"error": "property set failed to load: %r" % (e,)})); sys.exit(0)
+others = []
+for o in DATA["others"]:
+    try:
+        others.append((o["name"], mk(o["precondition"], o["generator"])))
+    except BaseException:
+        pass
+N = DATA["examples"]
+
+def invalid(a):   # the vote's rule: more than half of the other property sets reject it
+    rej = [not accepts(pre, a) for _, (pre, _s) in others]
+    return bool(rej) and sum(rej) > len(rej) / 2
+
+cases = []
+for c in DATA["cases"]:
+    try:
+        cases.append({"ok": not accepts(fpre, parse(c["input_repr"]))})
+    except BaseException as e:
+        cases.append({"ok": False, "msg": "bad input repr: %r" % (e,)})
+
+own = draw(fstrat, N)
+valid = [a for a in own if accepts(fpre, a)]
+bad = [short(a, 200) for a in valid if invalid(a)]
+pool = []
+for _, (_p, st) in others:
+    pool += [a for a in draw(st, max(20, N // 2)) if not invalid(a)]
+kept = sum(accepts(fpre, a) for a in pool)
+print(json.dumps({"cases": cases, "drawn": len(own), "valid": len(valid), "invalid_generated": len(bad), "invalid_examples": bad[:4],
+                  "pool": len(pool), "pool_accepted": kept}))
+'''
+
 
 def _data(script: str, data: dict) -> str:
     return script.replace("__DATA__", repr(json.dumps(data)))
@@ -244,11 +308,44 @@ def make_jobs(tasks: list[dict], votes: list[dict], mutants: list[dict]) -> dict
             j["cases"].append({"input_repr": v["input_repr"], "expected": ys, "witness": members[0],
                                "got": vd["output"], "failed_properties": vd["properties"]})
     pjobs = _property_jobs(tmap, votes, info)
-    used = {j["task_id"] for j in jobs.values()} | {j["task_id"] for j in pjobs}
+    gjobs = _generator_jobs(tmap, votes, info)
+    used = {j["task_id"] for j in jobs.values()} | {j["task_id"] for j in pjobs} | {j["task_id"] for j in gjobs}
     keep = ("entry_point", "propertySets", "properties", "implementations")
     return {"tasks": {t: {k: tmap[t].get(k) or [] for k in keep} for t in sorted(used)},
             "jobs": sorted(jobs.values(), key=lambda j: j["id"]),
-            "property_jobs": sorted(pjobs, key=lambda j: j["id"])}
+            "property_jobs": sorted(pjobs, key=lambda j: j["id"]),
+            "generator_jobs": sorted(gjobs, key=lambda j: j["id"])}
+
+
+def _generator_jobs(tmap: dict, votes: list[dict], info: dict) -> list[dict]:
+    """One job per property set that produced inputs most property sets reject (precondition too lax or generator off-spec)."""
+    inputs = {(v["task_id"], v["input_repr"]): v for v in votes if v.get("type") == "input"}
+    cases, catches = defaultdict(dict), defaultdict(dict)
+    for r in votes:
+        if r.get("type") != "row" or r["task_id"] not in tmap:
+            continue
+        key = (r["task_id"], r.get("generator") or r["propset"])
+        if r["verdict"] == "generator_wrong":
+            v = inputs.get((r["task_id"], r["input_repr"]), {})
+            c = cases[key].setdefault(r["input_repr"], {"input_repr": r["input_repr"], "rejecting": v.get("rejecting", []),
+                                                        "accepting": v.get("accepting", []), "properties": []})
+            c["properties"] = sorted(set(c["properties"]) | {r["property"]})
+        elif r["verdict"] == "bug" and r["candidate"] in info:
+            catches[(r["task_id"], r["propset"])][r["candidate"]] = info[r["candidate"]][2]
+    out = []
+    for (tid, name), cs in cases.items():
+        sets = tmap[tid].get("propertySets") or []
+        cur = next((p for p in sets if p["name"] == name), None)
+        if cur is None:
+            continue
+        prompt = next((i[0] for k, i in info.items() if k.startswith(tid + "/mut")), "")
+        out.append({"id": f"{tid}::propset:{name}", "target": "generator", "task_id": tid, "propset": name,
+                    "entry_point": tmap[tid]["entry_point"], "prompt": prompt,
+                    "precondition": cur["precondition"], "generator": cur["generator"],
+                    "others": [{k: p[k] for k in ("name", "precondition", "generator")} for p in sets if p["name"] != name],
+                    "cases": list(cs.values()),
+                    "must_still_catch": [{"id": i, "code": c} for i, c in sorted(catches.get((tid, name), {}).items())]})
+    return out
 
 
 def _property_jobs(tmap: dict, votes: list[dict], info: dict) -> list[dict]:
@@ -289,7 +386,7 @@ def _property_jobs(tmap: dict, votes: list[dict], info: dict) -> list[dict]:
 
 
 def _job(jobs: dict, cid: str) -> dict:
-    every = jobs["jobs"] + jobs.get("property_jobs", [])
+    every = jobs["jobs"] + jobs.get("property_jobs", []) + jobs.get("generator_jobs", [])
     for j in every:
         if j["id"] == cid:
             return j
@@ -410,6 +507,73 @@ def format_property_check(job: dict, r: dict) -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------- generator repair
+
+def show_generator(job: dict) -> str:
+    lines = [f"# property set {job['propset']} of {job['task_id']} (entry point {job['entry_point']})", "",
+             "## Spec", job["prompt"].rstrip(), "", "## Current precondition and generator", job["precondition"].rstrip(), "",
+             job["generator"].rstrip(), "",
+             "## Other property sets (their preconditions are the reference for what a valid input is)"]
+    lines += [f"[{o['name']}]\n{o['precondition'].rstrip()}" for o in job["others"]] or ["(none)"]
+    lines += ["", f"## {len(job['cases'])} input(s) this property set generated and accepted, but most property sets reject",
+              "They are outside the spec, so test failures on them mean nothing. Fix the precondition (it must reject them) "
+              "and the generator (it should stop producing them)."]
+    for i, c in enumerate(job["cases"]):
+        lines.append(f"[{i}] {c['input_repr'][:600]}   rejected by: {', '.join(c['rejecting']) or '?'}; "
+                     f"accepted by: {', '.join(c['accepting']) or '?'}")
+    lines += ["", f"## {len(job['must_still_catch'])} real bug(s) this property set caught on valid inputs and must keep catching"]
+    lines += [f"  {m['id']}" for m in job["must_still_catch"]]
+    return "\n".join(lines)
+
+
+def _fixed_set(job: dict, code: str) -> dict:
+    """The agent's file holds the precondition and the strategy together."""
+    return {"name": job["propset"], "precondition": code, "generator": code}
+
+
+def check_generator(job: dict, task: dict, code: str, examples: int = 200, timeout: float = 120) -> dict:
+    data = {"entry_point": job["entry_point"], "precondition": code, "generator": code, "call_timeout": 2.0,
+            "examples": examples, "cases": job["cases"], "others": job["others"]}
+    res = run_code(_data(_GEN_CHECK, data), timeout=timeout)
+    out = _last_json(res)
+    if not isinstance(out, dict) or "cases" not in out:
+        detail = (out or {}).get("error") if isinstance(out, dict) else None
+        detail = detail or (res["stderr"] or res["stdout"]).strip()[-300:] or f"exit {res['exit_code']}"
+        return {"error": detail, "cases": [], "regress": [], "ok": False}
+    regress = []
+    for m in job["must_still_catch"]:
+        rows = harness.check_candidate(m["code"], job["entry_point"], [_fixed_set(job, code)], task["properties"],
+                                       [], 100, timeout)
+        regress.append({"id": m["id"], "caught": any(r["status"] == "failed" for r in rows)})
+    rate = out["pool_accepted"] / out["pool"] if out["pool"] else 1.0
+    ok = (all(c["ok"] for c in out["cases"]) and out["invalid_generated"] == 0 and out["valid"] >= 10
+          and rate >= 0.9 and all(m["caught"] for m in regress))
+    return {**out, "accept_rate": round(rate, 3), "regress": regress, "ok": ok}
+
+
+def format_generator_check(job: dict, r: dict) -> str:
+    if r.get("error"):
+        return f"error: {r['error']}\nRESULT: not fixed yet"
+    lines = [f"confirmed invalid inputs now rejected by the precondition: {sum(c['ok'] for c in r['cases'])}/{len(r['cases'])}"]
+    for i, c in enumerate(r["cases"]):
+        if not c["ok"]:
+            lines.append(f"  [{i}] still accepted: {job['cases'][i]['input_repr'][:200]}")
+    lines.append(f"generator: {r['drawn']} inputs drawn, {r['valid']} pass your precondition, "
+                 f"{r['invalid_generated']} of those are still invalid (rejected by the other property sets)")
+    for e in r["invalid_examples"]:
+        lines.append(f"  still generated: {e}")
+    lines.append(f"valid inputs (as judged by the other property sets) that your precondition accepts: {r['pool_accepted']}/{r['pool']}"
+                 f" = {r['accept_rate']:.0%} (need at least 90%; do not over-tighten)")
+    lines.append(f"real bugs still caught on valid inputs: {sum(m['caught'] for m in r['regress'])}/{len(r['regress'])}")
+    for m in r["regress"]:
+        if not m["caught"]:
+            lines.append(f"  {m['id']}: no longer caught by this property set")
+    if r["valid"] < 10:
+        lines.append("  too few generated inputs pass your precondition (need at least 10 of the draws)")
+    lines.append("RESULT: " + ("fixed" if r["ok"] else "not fixed yet"))
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- evaluation
 
 def agrees_with_canonical(code: str, reference: str, task: dict, entry_point: str, examples: int = 200, timeout: float = 180) -> dict:
@@ -422,7 +586,7 @@ def agrees_with_canonical(code: str, reference: str, task: dict, entry_point: st
 
 def evaluate(jobs: dict, repairs: list[dict], mutants: list[dict], workers: int = MAX_CONCURRENT) -> list[dict]:
     canon = private.load_canonical()
-    by_id = {j["id"]: j for j in jobs["jobs"] + jobs.get("property_jobs", [])}
+    by_id = {j["id"]: j for j in jobs["jobs"] + jobs.get("property_jobs", []) + jobs.get("generator_jobs", [])}
     by_task = defaultdict(list)
     for m in mutants:
         by_task[m["task_id"]].append(m)
@@ -450,6 +614,30 @@ def evaluate(jobs: dict, repairs: list[dict], mutants: list[dict], workers: int 
                           else "plausible_only" if r["ok"] else "failed")
         return rec
 
+    def one_generator(job, task, rep):
+        r = check_generator(job, task, rep["code"])
+        old = {"name": job["propset"], "precondition": job["precondition"], "generator": job["generator"]}
+        new = _fixed_set(job, rep["code"])
+        rec = {"id": job["id"], "task_id": job["task_id"], "target": "generator",
+               "cases_fixed": sum(c["ok"] for c in r["cases"]), "cases_total": len(r["cases"]),
+               "invalid_generated": r.get("invalid_generated"), "accept_rate": r.get("accept_rate"),
+               "bugs_still_caught": sum(m["caught"] for m in r["regress"]), "bugs_total": len(r["regress"]),
+               "code": rep["code"], "notes": rep.get("notes", "")}
+
+        def failing(src, ps):
+            rows = harness.check_candidate(src, job["entry_point"], [ps], task["properties"], [], 100, 120)
+            return [x for x in rows if x["status"] == "failed"]
+        if job["task_id"] in canon:   # held out: the original solution must pass every property on the fixed inputs
+            bad = failing(canon[job["task_id"]], new)
+            rec["canonical_failures"] = [f"{x['property']}: input={x['input'][:150]} program={x['candidate_out']}" for x in bad[:3]]
+        mut = by_task.get(job["task_id"], [])
+        rec["mutants_caught_before"] = sum(bool(failing(m["prompt"] + m["mutated_solution"], old)) for m in mut)
+        rec["mutants_caught_after"] = sum(bool(failing(m["prompt"] + m["mutated_solution"], new)) for m in mut)
+        rec["mutants_total"] = len(mut)
+        rec["verdict"] = ("repaired" if r["ok"] and not rec.get("canonical_failures")
+                          else "plausible_only" if r["ok"] else "failed")
+        return rec
+
     def one(rep):
         job = by_id.get(rep.get("id"))
         if job is None or not rep.get("code"):
@@ -457,6 +645,8 @@ def evaluate(jobs: dict, repairs: list[dict], mutants: list[dict], workers: int 
         task = jobs["tasks"][job["task_id"]]
         if job.get("target") == "property":
             return one_property(job, task, rep)
+        if job.get("target") == "generator":
+            return one_generator(job, task, rep)
         r = check(job, task, rep["code"])
         rec = {"id": job["id"], "task_id": job["task_id"], "target": "program", "kind": job["kind"], "cases_fixed": r["cases_ok"],
                "cases_total": len(r["cases"]), "props_failing": sorted({f"{p['propset']}/{p['property']}" for p in r["props_failed"]}),
@@ -478,17 +668,19 @@ def summarize(recs: list[dict]) -> str:
         by[r["verdict"]].append(r["id"])
     lines = [f"repairs scored: {len(recs)}"]
     names = {"repaired": "program: fixes every confirmed case and agrees with the canonical solution; "
-                         "property: accepts the correct outputs, still rejects the bugs, canonical passes it",
+                         "property: accepts the correct outputs, still rejects the bugs, canonical passes it; "
+                         "generator: rejects the invalid inputs, generates no more of them, still catches the bugs, canonical passes",
              "plausible_only": "passes the confirmed checks but not the held-out canonical comparison",
              "failed": "fails a confirmed check", "invalid": "unknown id or no code"}
     for k in ("repaired", "plausible_only", "failed", "invalid"):
         if by.get(k):
             lines.append(f"  {k} ({names[k]}): {len(by[k])}: {', '.join(sorted(by[k])[:10])}")
-    props = [r for r in recs if r.get("target") == "property"]
-    if props:
-        lines.append(f"  properties: mutants caught before -> after the repair: "
-                     f"{sum(r['mutants_caught_before'] for r in props)} -> {sum(r['mutants_caught_after'] for r in props)} "
-                     f"of {sum(r['mutants_total'] for r in props)} (counted per property)")
+    for target, what in (("property", "properties"), ("generator", "property sets")):
+        sel = [r for r in recs if r.get("target") == target]
+        if sel:
+            lines.append(f"  {what}: mutants caught before -> after the repair: "
+                         f"{sum(r['mutants_caught_before'] for r in sel)} -> {sum(r['mutants_caught_after'] for r in sel)} "
+                         f"of {sum(r['mutants_total'] for r in sel)} (counted per {target})")
     return "\n".join(lines)
 
 
@@ -518,19 +710,22 @@ def main() -> None:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)
         Path(a.out).write_text(json.dumps(jobs, indent=1))
         print(f"{len(jobs['jobs'])} program repair jobs ({sum(len(j['cases']) for j in jobs['jobs'])} confirmed cases), "
-              f"{len(jobs['property_jobs'])} property repair jobs -> {a.out}")
+              f"{len(jobs['property_jobs'])} property repair jobs, {len(jobs['generator_jobs'])} generator repair jobs -> {a.out}")
         return
     jobs = json.loads(Path(a.jobs).read_text())
     try:
         if a.cmd == "show":
             job = _job(jobs, a.id)
-            print(show_property(job) if job.get("target") == "property" else show(job))
+            print({"property": show_property, "generator": show_generator}.get(job.get("target"), show)(job))
         elif a.cmd == "check":
             job = _job(jobs, a.id)
             task, code = jobs["tasks"][job["task_id"]], Path(a.code).read_text()
             if job.get("target") == "property":
                 r = check_property(job, task, code, a.examples)
                 print(format_property_check(job, r))
+            elif job.get("target") == "generator":
+                r = check_generator(job, task, code, max(a.examples, 200))
+                print(format_generator_check(job, r))
             else:
                 r = check(job, task, code, a.examples)
                 print(format_check(job, r))

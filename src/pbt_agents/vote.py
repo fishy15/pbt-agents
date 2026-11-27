@@ -14,8 +14,11 @@ For every distinct failing input found by the harness (per task):
    and rerun).
 
 The inputs voted on are the *calls* the failing property run made to the program, not the property's
-own arguments (a metamorphic property calls the program on inputs derived from them). Every call of a
-failing property run is judged, then the run gets one verdict: "bug" if some call returned something
+own arguments (a metamorphic property calls the program on inputs derived from them). Before that, the
+input the generator produced for the property is checked with the precondition vote alone: if most
+property sets reject it, the run is "generator_wrong" (the property set that generated it let an invalid
+input through) and nothing else is judged. Otherwise every call of the failing run is judged and the run
+gets one verdict: "bug" if some call returned something
 other than y* (the program is wrong), "property_wrong" if every call was valid and returned y* yet the
 property raised (the property is wrong), "dismissed" if a call was an invalid input (the property built
 one), "unresolved" if some call has no y* (pending a human answer).
@@ -94,6 +97,9 @@ for ps in DATA["propsets"]:
         pre.append({"name": ps["name"], "accept": bool(ns["precondition"](*copy.deepcopy(args)))})
     except BaseException:
         pre.append({"name": ps["name"], "accept": False})
+
+if DATA.get("pre_only"):
+    print(json.dumps({"pre": pre})); sys.exit(0)
 
 groups, wits = [], []   # groups: {"repr", "value", "members"}
 for w in DATA["witnesses"]:
@@ -191,7 +197,27 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
     # (a metamorphic property calls the program on inputs it derives from its own arguments).
     inputs = defaultdict(lambda: {"cands": set(), "props": defaultdict(set)})
     failed = [r for r in rows if r["status"] == "failed" and (r.get("calls") or r.get("input_repr"))]
-    for r in failed:
+
+    # First: was the input the *generator* produced for the property valid at all? If most property sets'
+    # preconditions reject it, the failing run says nothing about the program or the property: the property
+    # set that generated it (precondition too lax, or generator off-spec) is at fault. Such runs are set
+    # aside before any witness is run or any user is asked.
+    def probe_pre(key):
+        tid, rep = key
+        data = {"entry_point": tmap[tid]["entry_point"], "args_repr": rep, "call_timeout": 2.0, "pre_only": True,
+                "propsets": [{k: p[k] for k in ("name", "precondition")} for p in tmap[tid]["propertySets"]]}
+        res = run_code(_SCRIPT.replace("__DATA__", repr(json.dumps(data))), timeout=timeout)
+        try:
+            return json.loads(res["stdout"].strip().splitlines()[-1])["pre"]
+        except (IndexError, ValueError, KeyError):
+            return None
+
+    arg_keys = sorted({(r["task_id"], r["input_repr"]) for r in failed if r.get("input_repr") and r["task_id"] in tmap})
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        arg_pre = dict(zip(arg_keys, ex.map(probe_pre, arg_keys)))
+    bad_args = {k: pre for k, pre in arg_pre.items() if pre and sum(not p["accept"] for p in pre) > len(pre) / 2}
+    judged = [r for r in failed if (r["task_id"], r.get("input_repr")) not in bad_args]
+    for r in judged:
         for rep in _calls(r):
             e = inputs[(r["task_id"], rep)]
             e["cands"].add(r["candidate"])
@@ -261,9 +287,19 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
     #   unresolved      no bug found but some call has no y*
     #   dismissed       no bug found but some call was an invalid input        -> the property built an invalid input
     #   property_wrong  every call was valid and returned y*, yet the property raised -> the property is wrong
+    for (tid, rep), pre in sorted(bad_args.items()):
+        out.append({"type": "input", "task_id": tid, "input": rep[:300], "input_repr": rep, "decision": "rejected",
+                    "pre_accept": sum(p["accept"] for p in pre), "pre_total": len(pre),
+                    "accepting": [p["name"] for p in pre if p["accept"]], "rejecting": [p["name"] for p in pre if not p["accept"]]})
     by_call = {(r["task_id"], r["input_repr"]): r for r in out if r.get("verdicts")}
     for r in failed:
         if r["task_id"] not in tmap:
+            continue
+        if (r["task_id"], r.get("input_repr")) in bad_args:
+            pre = bad_args[(r["task_id"], r["input_repr"])]
+            out.append({"type": "row", "task_id": r["task_id"], "candidate": r["candidate"], "propset": r["propset"],
+                        "property": r["property"], "input_repr": r["input_repr"], "verdict": "generator_wrong",
+                        "generator": r["propset"], "accepting": [p["name"] for p in pre if p["accept"]], "calls": []})
             continue
         calls = []
         for rep in _calls(r):
@@ -291,11 +327,13 @@ def summarize(recs: list[dict]) -> str:
         by[r["decision"]] += 1
     lines.append("decisions: " + ", ".join(f"{k}={v}" for k, v in sorted(by.items())))
     lines.append(f"failing property runs: {len(rows)}")
-    for k in ("bug", "property_wrong", "dismissed", "unresolved"):
+    for k in ("bug", "property_wrong", "generator_wrong", "dismissed", "unresolved"):
         sel = [r for r in rows if r["verdict"] == k]
         if sel:
-            names = sorted({r["candidate"] if k == "bug" else f"{r['task_id']}::{r['property']}" for r in sel})
-            what = "programs" if k == "bug" else "properties" if k == "property_wrong" else "candidate/property pairs"
+            names = sorted({r["candidate"] if k == "bug" else f"{r['task_id']}::{r['generator']}" if k == "generator_wrong"
+                            else f"{r['task_id']}::{r['property']}" for r in sel})
+            what = ("programs" if k == "bug" else "properties" if k == "property_wrong"
+                    else "property sets" if k == "generator_wrong" else "candidate/property pairs")
             lines.append(f"  {k}: {len(sel)} runs; {len(names)} {what}, e.g. {', '.join(names[:8])}")
     lines.append(f"candidates with a confirmed bug: {len({r['candidate'] for r in rows if r['verdict'] == 'bug'})}")
     return "\n".join(lines)
