@@ -430,6 +430,9 @@ def main() -> None:
                     help="also keep mutants that crash/time out (default: wrong-answer only)")
     a = ap.parse_args()
     build(a.out, a.max_per_task, a.seed, a.workers, a.include_exceptions, a.level)
+    from pbt_agents import private
+    if private.split(a.out):
+        print(f"canonical solutions and mutation details moved to {private.full_path()} (agents only get the public file)")
 
 
 if __name__ == "__main__":

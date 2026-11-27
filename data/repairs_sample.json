@@ -1,0 +1,30 @@
+[
+ {
+  "id": "HumanEval/0/mut0",
+  "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n\n\n    sorted_numbers = sorted(numbers)\n    for i in range(len(sorted_numbers) - 1):\n        if sorted_numbers[i + 1] - sorted_numbers[i] < threshold:\n            return True\n    return False\n",
+  "fixed": true,
+  "rounds": 1,
+  "notes": "The bug was `return None` inside the loop, which should be `return True` when two adjacent sorted numbers are closer than the threshold. Changed that one line. The check reports 2/2 confirmed cases fixed and 0 shared property failures, on the first round."
+ },
+ {
+  "id": "HumanEval/0/mut2",
+  "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n\n\n    sorted_numbers = sorted(numbers)\n    for i in range(len(sorted_numbers) - 1):\n        if sorted_numbers[i + 1] - sorted_numbers[i] < threshold:\n            return True\n    return False\n",
+  "fixed": true,
+  "rounds": 1,
+  "notes": "The comparison used sorted_numbers[i - 1] - sorted_numbers[i], which compares each element with its predecessor (and wraps to the last element when i is 0), so the result is a negative or wrapped difference. Changed it to sorted_numbers[i + 1] - sorted_numbers[i], the gap between adjacent sorted neighbours. One check in the sandbox: 2/2 confirmed cases fixed, 0 shared property failures."
+ },
+ {
+  "id": "HumanEval/12/mut0",
+  "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return s\n",
+  "fixed": true,
+  "rounds": 1,
+  "notes": "The loop returned None on the first string of maximal length instead of that string, so any non-empty input returned None. Changed `return None` to `return s`. The fix is in the sandbox check: the one confirmed case is fixed and no shared property fails. The fixed file is at /private/tmp/claude-501/-Users-aaryan-school-fall2026-cs593-project/b9a90304-b0ed-48f5-9399-6a6448383518/scratchpad/HumanEval_12_mut0_fixed.py."
+ },
+ {
+  "id": "HumanEval/20/mut1",
+  "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    \"\"\" From a supplied list of numbers (of length at least two) select and return two that are the closest to each\n    other and return them in order (smaller number, larger number).\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n\n\n    sorted_numbers = sorted(numbers)\n    min_diff = float(\"inf\")\n    min_pair = None\n    for l, r in zip(sorted_numbers[:-1], sorted_numbers[1:]):\n        diff = r - l\n        if diff < min_diff:\n            min_diff = diff\n            min_pair = (l, r)\n    return min_pair\n",
+  "fixed": true,
+  "rounds": 1,
+  "notes": "The loop paired each element with numbers[2:] instead of its neighbour numbers[1:], so adjacent pairs were skipped and two-element inputs returned None. Changed to zip over sorted_numbers[:-1] and sorted_numbers[1:], using sorted() so the caller's list is not mutated. The check reports 3/3 confirmed cases fixed and no failing shared properties."
+ }
+]

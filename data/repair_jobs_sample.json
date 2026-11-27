@@ -1,0 +1,434 @@
+{
+ "tasks": {
+  "HumanEval/0": {
+   "entry_point": "has_close_elements",
+   "propertySets": [
+    {
+     "name": "spec-valid",
+     "precondition": "import math\n\ndef _isnum(x):\n    return isinstance(x, float) and math.isfinite(x)\n\ndef precondition(*args):\n    try:\n        if len(args) != 2:\n            return False\n        n, t = args\n        return isinstance(n, list) and all(_isnum(x) for x in n) and _isnum(t) and t >= 0\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    f = st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False)\n    g = st.integers(-50, 50).map(lambda i: i / 4)\n    el = st.one_of(f, g)\n    th = st.one_of(st.floats(min_value=0, max_value=10, allow_nan=False, allow_infinity=False),\n                   st.sampled_from([0.0, 0.1, 0.3, 0.5, 1.0, 2.0]))\n    return st.tuples(st.lists(el, max_size=12), th)\n",
+     "notes": "Floats finite, no NaN/inf; threshold finite >= 0 (negative threshold is semantically odd so excluded); list may be empty. Quarter-step values included to force near-ties. Sandbox: 500/500 accepted."
+    },
+    {
+     "name": "edge-cases",
+     "precondition": "import math\n\ndef precondition(*args) -> bool:\n    try:\n        if len(args) != 2:\n            return False\n        n, t = args\n        fin = lambda x: isinstance(x, float) and math.isfinite(x)\n        if not isinstance(n, list) or not all(fin(x) for x in n):\n            return False\n        return fin(t) and t >= 0 and t <= 1e9 and all(abs(x) <= 1e9 for x in n)\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    base = st.one_of(\n        st.sampled_from([0.0, -0.0, 0.5, -0.5, 1.0, -1.0, 1e9, -1e9, 1e-9, 0.25]),\n        st.integers(-20, 20).map(lambda i: i * 0.5),\n        st.floats(-1e9, 1e9, allow_nan=False, allow_infinity=False))\n    nums = st.one_of(\n        st.just([]),\n        base.map(lambda x: [x]),\n        st.lists(base, max_size=8),\n        base.flatmap(lambda x: st.lists(st.just(x), min_size=2, max_size=4)))\n    thr = st.one_of(\n        st.sampled_from([0.0, 0.5, 1.0, 0.25, 1e-9, 1e9]),\n        st.integers(0, 10).map(lambda i: i * 0.5),\n        st.floats(0, 1e9, allow_nan=False, allow_infinity=False))\n    return st.tuples(nums, thr)\n"
+    }
+   ],
+   "properties": [
+    {
+     "name": "returns_bool",
+     "description": "Output is a bool.",
+     "code": "import copy\ndef prop_returns_bool(candidate, numbers, threshold):\n    assert isinstance(candidate(copy.deepcopy(numbers), threshold), bool)\n"
+    },
+    {
+     "name": "permutation_invariant",
+     "description": "Reordering the input (reverse, shuffle) does not change the answer.",
+     "code": "import copy, random\ndef prop_permutation_invariant(candidate, numbers, threshold):\n    a = candidate(copy.deepcopy(numbers), threshold)\n    n = copy.deepcopy(numbers)[::-1]\n    assert candidate(n, threshold) == a\n    n = copy.deepcopy(numbers)\n    random.Random(len(n)).shuffle(n)\n    assert candidate(n, threshold) == a\n"
+    },
+    {
+     "name": "threshold_monotone",
+     "description": "If True for a threshold, True for any larger threshold.",
+     "code": "import copy\ndef prop_threshold_monotone(candidate, numbers, threshold):\n    if candidate(copy.deepcopy(numbers), threshold):\n        assert candidate(copy.deepcopy(numbers), threshold + 1.0) is True\n        assert candidate(copy.deepcopy(numbers), max(threshold * 2, threshold + 1.0)) is True\n"
+    },
+    {
+     "name": "nonpositive_threshold_false",
+     "description": "Distances are >= 0 so a threshold <= 0 can never be exceeded strictly: result False.",
+     "code": "import copy\ndef prop_nonpositive_threshold_false(candidate, numbers, threshold):\n    if threshold <= 0:\n        assert candidate(copy.deepcopy(numbers), threshold) is False\n"
+    },
+    {
+     "name": "duplicate_is_close",
+     "description": "Appending a copy of an existing element with positive threshold makes the answer True (distance 0).",
+     "code": "import copy\ndef prop_duplicate_is_close(candidate, numbers, threshold):\n    if numbers and threshold > 0:\n        n = copy.deepcopy(numbers)\n        n.append(copy.deepcopy(numbers)[len(numbers) // 2])\n        assert candidate(n, threshold) is True\n"
+    },
+    {
+     "name": "superset_monotone",
+     "description": "If a sublist has a close pair, the full list does too.",
+     "code": "import copy\ndef prop_superset_monotone(candidate, numbers, threshold):\n    if len(numbers) >= 2 and candidate(copy.deepcopy(numbers[:-1]), threshold):\n        assert candidate(copy.deepcopy(numbers), threshold) is True\n"
+    }
+   ],
+   "implementations": [
+    {
+     "name": "straightforward",
+     "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    for i in range(len(numbers)):\n        for j in range(i + 1, len(numbers)):\n            if abs(numbers[i] - numbers[j]) < threshold:\n                return True\n    return False\n",
+     "notes": "Pairwise check with strict < threshold. Docstring examples passed in sandbox."
+    },
+    {
+     "name": "brute-force",
+     "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    n = len(numbers)\n    for i in range(n):\n        for j in range(n):\n            if i != j and abs(numbers[i] - numbers[j]) < threshold:\n                return True\n    return False\n",
+     "notes": "Checks all ordered index pairs i != j; strict '<' threshold. Docstring examples pass in sandbox."
+    },
+    {
+     "name": "optimized",
+     "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    s = sorted(numbers)\n    return any(b - a < threshold for a, b in zip(s, s[1:]))\n",
+     "notes": "Sort then check adjacent gaps, O(n log n). Strict < threshold. Docstring examples passed in sandbox."
+    }
+   ]
+  },
+  "HumanEval/12": {
+   "entry_point": "longest",
+   "propertySets": [
+    {
+     "name": "spec-valid",
+     "precondition": "def precondition(*args):\n    try:\n        return len(args) == 1 and isinstance(args[0], list) and all(isinstance(s, str) for s in args[0])\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    s = st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=126), max_size=10)\n    s2 = st.text(alphabet=\"ab\", max_size=4)\n    return st.tuples(st.lists(st.one_of(s, s2), max_size=8))\n",
+     "notes": "Any list of str including empty list and empty strings; small alphabet 'ab' produces frequent equal-length ties. Sandbox: 500/500 accepted."
+    },
+    {
+     "name": "edge-cases",
+     "precondition": "def precondition(*args) -> bool:\n    try:\n        return len(args) == 1 and isinstance(args[0], list) and all(isinstance(s, str) for s in args[0])\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    s = st.one_of(st.just(\"\"), st.text(max_size=5), st.text(alphabet=\"ab\", max_size=4))\n    return st.one_of(\n        st.just([]),\n        s.map(lambda x: [x]),\n        st.lists(s, max_size=8),\n        st.lists(st.text(alphabet=\"abc\", min_size=3, max_size=3), min_size=2, max_size=6),\n    ).map(lambda l: (l,))\n"
+    }
+   ],
+   "properties": [
+    {
+     "name": "empty_none",
+     "description": "None exactly when the list is empty.",
+     "code": "import copy\ndef prop_empty_none(candidate, strings):\n    r = candidate(copy.deepcopy(strings))\n    if not strings:\n        assert r is None\n    else:\n        assert r is not None\n"
+    },
+    {
+     "name": "member_and_max_len",
+     "description": "Result is a string from the input and no input string is longer.",
+     "code": "import copy\ndef prop_member_and_max_len(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        assert isinstance(r, str) and r in strings\n        assert all(len(r) >= len(s) for s in strings)\n"
+    },
+    {
+     "name": "first_of_ties",
+     "description": "Result is the earliest string with maximal length (strings before it are strictly shorter).",
+     "code": "import copy\ndef prop_first_of_ties(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        m = len(r)\n        first = next(i for i, s in enumerate(strings) if len(s) == m)\n        assert strings[first] == r\n        assert all(len(s) < m for s in strings[:first])\n"
+    },
+    {
+     "name": "append_not_longer",
+     "description": "Appending the result or a shorter string does not change the answer.",
+     "code": "import copy\ndef prop_append_not_longer(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        assert candidate(copy.deepcopy(strings) + [r]) == r\n        assert candidate(copy.deepcopy(strings) + [r[:-1]]) == r\n"
+    },
+    {
+     "name": "append_longer_wins",
+     "description": "A strictly longer string wins wherever it is placed.",
+     "code": "import copy\ndef prop_append_longer_wins(candidate, strings):\n    base = max((len(s) for s in strings), default=0)\n    new = 'z' * (base + 1)\n    assert candidate(copy.deepcopy(strings) + [new]) == new\n    assert candidate([new] + copy.deepcopy(strings)) == new\n"
+    },
+    {
+     "name": "prepend_tie_wins",
+     "description": "A same-length string prepended wins the tie; appended it loses.",
+     "code": "import copy\ndef prop_prepend_tie_wins(candidate, strings):\n    if strings:\n        r = candidate(copy.deepcopy(strings))\n        marker = '\\x00' * len(r)\n        assert candidate([marker] + copy.deepcopy(strings)) == marker\n        assert candidate(copy.deepcopy(strings) + [marker]) == r\n"
+    },
+    {
+     "name": "reverse_same_length",
+     "description": "Reversing the list leaves the result length unchanged.",
+     "code": "import copy\ndef prop_reverse_same_length(candidate, strings):\n    if strings:\n        a = candidate(copy.deepcopy(strings))\n        b = candidate(copy.deepcopy(strings)[::-1])\n        assert len(a) == len(b)\n"
+    }
+   ],
+   "implementations": [
+    {
+     "name": "straightforward",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    best = None\n    for s in strings:\n        if best is None or len(s) > len(best):\n            best = s\n    return best\n",
+     "notes": "Strict > keeps the first of equal-length strings; None for empty list. Docstring examples passed."
+    },
+    {
+     "name": "brute-force",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    best = None\n    for s in strings:\n        if best is None or len(s) > len(best):\n            best = s\n    return best\n",
+     "notes": "Strict '>' keeps the first of equal-length strings; empty list returns None. Docstring examples pass in sandbox."
+    },
+    {
+     "name": "optimized",
+     "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    return max(strings, key=len) if strings else None\n",
+     "notes": "max returns the first maximal element, matching the tie rule. Docstring examples passed in sandbox."
+    }
+   ]
+  },
+  "HumanEval/20": {
+   "entry_point": "find_closest_elements",
+   "propertySets": [
+    {
+     "name": "spec-valid",
+     "precondition": "import math\n\ndef _isnum(x):\n    return isinstance(x, float) and math.isfinite(x)\n\ndef precondition(*args):\n    try:\n        return len(args) == 1 and isinstance(args[0], list) and len(args[0]) >= 2 and all(_isnum(x) for x in args[0])\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    f = st.floats(min_value=-100, max_value=100, allow_nan=False, allow_infinity=False)\n    g = st.integers(-50, 50).map(lambda i: i / 4)\n    return st.tuples(st.lists(st.one_of(f, g), min_size=2, max_size=12))\n",
+     "notes": "List of finite floats with length >= 2 (stated in prose). Quarter-step values give duplicates and ties. Sandbox: 500/500 accepted."
+    },
+    {
+     "name": "edge-cases",
+     "precondition": "import math\n\ndef precondition(*args) -> bool:\n    try:\n        if len(args) != 1:\n            return False\n        n = args[0]\n        fin = lambda x: isinstance(x, float) and math.isfinite(x)\n        if not isinstance(n, list) or len(n) < 2 or not all(fin(x) for x in n):\n            return False\n        if any(abs(x) > 1e9 for x in n):\n            return False\n        best = None\n        pairs = set()\n        for i in range(len(n)):\n            for j in range(i + 1, len(n)):\n                a, b = sorted((n[i], n[j]))\n                d = b - a\n                if best is None or d < best:\n                    best = d\n                    pairs = {(a, b)}\n                elif d == best:\n                    pairs.add((a, b))\n        return len(pairs) == 1\n    except Exception:\n        return False\n",
+     "generator": "from hypothesis import strategies as st\n\ndef strategy():\n    base = st.one_of(\n        st.sampled_from([0.0, -1.0, 1.0, 1e9, -1e9, 0.5]),\n        st.integers(-50, 50).map(float),\n        st.floats(-1e9, 1e9, allow_nan=False, allow_infinity=False))\n    return st.one_of(\n        st.lists(base, min_size=2, max_size=2),\n        st.lists(base, min_size=2, max_size=8),\n        base.flatmap(lambda x: st.lists(st.just(x), min_size=2, max_size=4)),\n        st.lists(st.floats(-1e9, 1e9, allow_nan=False, allow_infinity=False), min_size=2, max_size=8),\n    ).map(lambda l: (l,))\n",
+     "notes": "Sandbox ran fine. Acceptance rates over 1000 draws: task0 100%, task12 100%, task20 73%. Task0: finite floats only, threshold >=0 (negative threshold ruled out as unspecified), magnitudes <=1e9 to avoid overflow; half-integer values make threshold-equals-gap boundaries exact. Task12: any list of strings, including empty strings and equal-length ties. Task20: length>=2, finite, and the closest pair must be unique as a (small, large) value pair, since the spec doesn't say which pair to return on ties (duplicates of the same value are still allowed, giving e.g. (2.0, 2.0))."
+    }
+   ],
+   "properties": [
+    {
+     "name": "shape_and_order",
+     "description": "Returns a 2-tuple with smaller first.",
+     "code": "import copy\ndef prop_shape_and_order(candidate, numbers):\n    r = candidate(copy.deepcopy(numbers))\n    assert isinstance(r, tuple) and len(r) == 2\n    assert r[0] <= r[1]\n"
+    },
+    {
+     "name": "members",
+     "description": "Both values come from the input; equal values require a repeated element.",
+     "code": "import copy\ndef prop_members(candidate, numbers):\n    a, b = candidate(copy.deepcopy(numbers))\n    assert a in numbers and b in numbers\n    if a == b:\n        assert numbers.count(a) >= 2\n"
+    },
+    {
+     "name": "no_closer_pair",
+     "description": "No pair of input elements is closer than the returned pair.",
+     "code": "import copy\ndef prop_no_closer_pair(candidate, numbers):\n    a, b = candidate(copy.deepcopy(numbers))\n    d = b - a\n    for i in range(len(numbers)):\n        for j in range(i + 1, len(numbers)):\n            assert abs(numbers[i] - numbers[j]) >= d\n"
+    },
+    {
+     "name": "permutation_same_gap",
+     "description": "Reversing the input gives the same minimal gap (pair may differ on ties).",
+     "code": "import copy\ndef prop_permutation_same_gap(candidate, numbers):\n    a, b = candidate(copy.deepcopy(numbers))\n    c, d = candidate(copy.deepcopy(numbers)[::-1])\n    assert b - a == d - c\n"
+    },
+    {
+     "name": "duplicate_gives_equal_pair",
+     "description": "Appending a copy of an element forces a zero-gap pair (x, x).",
+     "code": "import copy\ndef prop_duplicate_gives_equal_pair(candidate, numbers):\n    n = copy.deepcopy(numbers) + [copy.deepcopy(numbers)[0]]\n    a, b = candidate(n)\n    assert a == b\n"
+    },
+    {
+     "name": "adding_element_gap_not_larger",
+     "description": "Adding an element never increases the minimal gap.",
+     "code": "import copy\ndef prop_adding_element_gap_not_larger(candidate, numbers):\n    if len(numbers) >= 3:\n        a, b = candidate(copy.deepcopy(numbers[:-1]))\n        c, d = candidate(copy.deepcopy(numbers))\n        assert d - c <= b - a\n"
+    },
+    {
+     "name": "exact_pair",
+     "description": "Hand-picked exact answers independent of the drawn input.",
+     "code": "def prop_exact_pair(candidate, numbers):\n    assert tuple(candidate([1.0, 5.0, 10.0, 5.5])) == (5.0, 5.5)\n    assert tuple(candidate([4.0, 1.0])) == (1.0, 4.0)\n    assert tuple(candidate([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])) == (2.0, 2.2)\n"
+    }
+   ],
+   "implementations": [
+    {
+     "name": "straightforward",
+     "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    best = None\n    for i in range(len(numbers)):\n        for j in range(i + 1, len(numbers)):\n            d = abs(numbers[i] - numbers[j])\n            if best is None or d < best[0]:\n                best = (d, min(numbers[i], numbers[j]), max(numbers[i], numbers[j]))\n    return (best[1], best[2])\n",
+     "notes": "Pairwise scan, strict < so the first closest pair by index order wins ties; returns (smaller, larger). Docstring examples passed."
+    },
+    {
+     "name": "brute-force",
+     "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    best = None\n    n = len(numbers)\n    for i in range(n):\n        for j in range(i + 1, n):\n            d = abs(numbers[i] - numbers[j])\n            if best is None or d < best[0]:\n                best = (d, min(numbers[i], numbers[j]), max(numbers[i], numbers[j]))\n    return (best[1], best[2])\n",
+     "notes": "Exhaustive over index pairs i<j; on ties in distance the first pair found (lowest i, then j) wins; result ordered (smaller, larger). Docstring examples pass in sandbox."
+    },
+    {
+     "name": "optimized",
+     "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    s = sorted(numbers)\n    a, b = min(zip(s, s[1:]), key=lambda p: p[1] - p[0])\n    return (a, b)\n",
+     "notes": "Closest pair is always adjacent after sorting; O(n log n). Ties go to the smallest pair. Docstring examples passed in sandbox."
+    }
+   ]
+  }
+ },
+ "jobs": [
+  {
+   "id": "HumanEval/0/mut0",
+   "task_id": "HumanEval/0",
+   "kind": "mutant",
+   "entry_point": "has_close_elements",
+   "prompt": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n",
+   "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n\n\n    sorted_numbers = sorted(numbers)\n    for i in range(len(sorted_numbers) - 1):\n        if sorted_numbers[i + 1] - sorted_numbers[i] < threshold:\n            return None\n    return False\n\n",
+   "cases": [
+    {
+     "input_repr": "([0.0, 0.0], 1.0)",
+     "expected": "True",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "spec-valid/returns_bool"
+     ]
+    },
+    {
+     "input_repr": "([0.0, 0.0], 0.5)",
+     "expected": "True",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/returns_bool"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/0/mut2",
+   "task_id": "HumanEval/0",
+   "kind": "mutant",
+   "entry_point": "has_close_elements",
+   "prompt": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n",
+   "code": "from typing import List\n\n\ndef has_close_elements(numbers: List[float], threshold: float) -> bool:\n    \"\"\" Check if in given list of numbers, are any two numbers closer to each other than\n    given threshold.\n    >>> has_close_elements([1.0, 2.0, 3.0], 0.5)\n    False\n    >>> has_close_elements([1.0, 2.8, 3.0, 4.0, 5.0, 2.0], 0.3)\n    True\n    \"\"\"\n\n\n    sorted_numbers = sorted(numbers)\n    for i in range(len(sorted_numbers) - 1):\n        if sorted_numbers[i - 1] - sorted_numbers[i] < threshold:\n            return True\n    return False\n\n",
+   "cases": [
+    {
+     "input_repr": "([0.0, 0.0, -1.0], 0.0)",
+     "expected": "False",
+     "witness": "straightforward",
+     "got": "True",
+     "failed_properties": [
+      "spec-valid/nonpositive_threshold_false"
+     ]
+    },
+    {
+     "input_repr": "([0.0, 0.0, -0.5], 0.0)",
+     "expected": "False",
+     "witness": "straightforward",
+     "got": "True",
+     "failed_properties": [
+      "edge-cases/nonpositive_threshold_false"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/12/mut0",
+   "task_id": "HumanEval/12",
+   "kind": "mutant",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return None\n\n",
+   "cases": [
+    {
+     "input_repr": "([''],)",
+     "expected": "",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_not_longer",
+      "edge-cases/empty_none",
+      "edge-cases/first_of_ties",
+      "edge-cases/member_and_max_len",
+      "edge-cases/prepend_tie_wins",
+      "edge-cases/reverse_same_length",
+      "spec-valid/append_not_longer",
+      "spec-valid/empty_none",
+      "spec-valid/first_of_ties",
+      "spec-valid/member_and_max_len",
+      "spec-valid/prepend_tie_wins",
+      "spec-valid/reverse_same_length"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/12/mut1",
+   "task_id": "HumanEval/12",
+   "kind": "mutant",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = min(len(x) for x in strings)\n    for s in strings:\n        if len(s) == maxlen:\n            return s\n\n",
+   "cases": [
+    {
+     "input_repr": "(['', '0'],)",
+     "expected": "0",
+     "witness": "straightforward",
+     "got": "",
+     "failed_properties": [
+      "edge-cases/member_and_max_len",
+      "spec-valid/member_and_max_len"
+     ]
+    },
+    {
+     "input_repr": "(['0', ''],)",
+     "expected": "0",
+     "witness": "straightforward",
+     "got": "",
+     "failed_properties": [
+      "edge-cases/first_of_ties",
+      "spec-valid/first_of_ties"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/12/mut2",
+   "task_id": "HumanEval/12",
+   "kind": "mutant",
+   "entry_point": "longest",
+   "prompt": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n",
+   "code": "from typing import List, Optional\n\n\ndef longest(strings: List[str]) -> Optional[str]:\n    \"\"\" Out of list of strings, return the longest one. Return the first one in case of multiple\n    strings of the same length. Return None in case the input list is empty.\n    >>> longest([])\n\n    >>> longest(['a', 'b', 'c'])\n    'a'\n    >>> longest(['a', 'bb', 'ccc'])\n    'ccc'\n    \"\"\"\n\n    if not strings:\n        return None\n\n    maxlen = max(len(x) for x in strings)\n    for s in strings:\n        pass\n\n",
+   "cases": [
+    {
+     "input_repr": "([''],)",
+     "expected": "",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/append_not_longer",
+      "edge-cases/empty_none",
+      "edge-cases/first_of_ties",
+      "edge-cases/member_and_max_len",
+      "edge-cases/prepend_tie_wins",
+      "edge-cases/reverse_same_length",
+      "spec-valid/append_not_longer",
+      "spec-valid/empty_none",
+      "spec-valid/first_of_ties",
+      "spec-valid/member_and_max_len",
+      "spec-valid/prepend_tie_wins",
+      "spec-valid/reverse_same_length"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/20/mut0",
+   "task_id": "HumanEval/20",
+   "kind": "mutant",
+   "entry_point": "find_closest_elements",
+   "prompt": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    \"\"\" From a supplied list of numbers (of length at least two) select and return two that are the closest to each\n    other and return them in order (smaller number, larger number).\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n",
+   "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    \"\"\" From a supplied list of numbers (of length at least two) select and return two that are the closest to each\n    other and return them in order (smaller number, larger number).\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n\n\n    pass\n    min_diff = float(\"inf\")\n    min_pair = None\n    for l, r in zip(numbers[:-1], numbers[1:]):\n        diff = r - l\n        if diff < min_diff:\n            min_diff = diff\n            min_pair = (l, r)\n    return min_pair\n\n",
+   "cases": [
+    {
+     "input_repr": "([1.0, 0.0],)",
+     "expected": "(0.0, 1.0)",
+     "witness": "straightforward",
+     "got": "(1.0, 0.0)",
+     "failed_properties": [
+      "edge-cases/shape_and_order",
+      "spec-valid/shape_and_order"
+     ]
+    },
+    {
+     "input_repr": "([0.0, -1.0],)",
+     "expected": "(-1.0, 0.0)",
+     "witness": "straightforward",
+     "got": "(0.0, -1.0)",
+     "failed_properties": [
+      "edge-cases/duplicate_gives_equal_pair",
+      "edge-cases/permutation_same_gap"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "HumanEval/20/mut1",
+   "task_id": "HumanEval/20",
+   "kind": "mutant",
+   "entry_point": "find_closest_elements",
+   "prompt": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    \"\"\" From a supplied list of numbers (of length at least two) select and return two that are the closest to each\n    other and return them in order (smaller number, larger number).\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n",
+   "code": "from typing import List, Tuple\n\n\ndef find_closest_elements(numbers: List[float]) -> Tuple[float, float]:\n    \"\"\" From a supplied list of numbers (of length at least two) select and return two that are the closest to each\n    other and return them in order (smaller number, larger number).\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.2])\n    (2.0, 2.2)\n    >>> find_closest_elements([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])\n    (2.0, 2.0)\n    \"\"\"\n\n\n    numbers.sort()\n    min_diff = float(\"inf\")\n    min_pair = None\n    for l, r in zip(numbers[:-1], numbers[2:]):\n        diff = r - l\n        if diff < min_diff:\n            min_diff = diff\n            min_pair = (l, r)\n    return min_pair\n\n",
+   "cases": [
+    {
+     "input_repr": "([0.0, 1.0],)",
+     "expected": "(0.0, 1.0)",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "spec-valid/duplicate_gives_equal_pair"
+     ]
+    },
+    {
+     "input_repr": "([0.0, 0.0],)",
+     "expected": "(0.0, 0.0)",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/exact_pair",
+      "edge-cases/members",
+      "edge-cases/no_closer_pair",
+      "edge-cases/permutation_same_gap",
+      "edge-cases/shape_and_order",
+      "spec-valid/exact_pair",
+      "spec-valid/members",
+      "spec-valid/no_closer_pair",
+      "spec-valid/permutation_same_gap",
+      "spec-valid/shape_and_order"
+     ]
+    },
+    {
+     "input_repr": "([0.0, -1.0],)",
+     "expected": "(-1.0, 0.0)",
+     "witness": "straightforward",
+     "got": "None",
+     "failed_properties": [
+      "edge-cases/duplicate_gives_equal_pair"
+     ]
+    }
+   ]
+  }
+ ]
+}

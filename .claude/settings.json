@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.cache/pbt-agents/**)",
+      "Read(~/.cache/huggingface/**)",
+      "Read(**/evalplus/**)",
+      "Bash(*pbt-agents/mutants_full*)",
+      "Bash(*PBT_PRIVATE_DIR*)",
+      "Bash(*.cache/pbt-agents*)",
+      "Bash(*.cache/huggingface*)"
+    ]
+  }
+}

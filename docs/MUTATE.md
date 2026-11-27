@@ -3,6 +3,10 @@
 Part of the dataset for this project: a set of subtly incorrect solutions built from [HumanEval+](https://huggingface.co/datasets/evalplus/humanevalplus).
 Each mutant is the canonical solution with one small, single-site edit that makes it fail the HumanEval+ tests.
 
+## Keeping the canonical solutions away from agents
+
+After generating, `mutate` splits the dataset (`pbt_agents.private`). The public file `data/humanevalplus_mutants.jsonl` keeps only `id`, `task_id`, `prompt`, `entry_point` and `mutated_solution`. `canonical_solution` and the fields that reveal the fix (`operator`, `description`, `line`, snippets, `failure_*`) go to `~/.cache/pbt-agents/mutants_full.jsonl` (override with `PBT_PRIVATE_DIR`). Only the harness, the vote and `repair evaluate` read it; no agent is given it, `.claude/settings.json` denies agents read access to it and to the dataset caches (a guardrail, not a sandbox). Split an existing file with `uv run python -m pbt_agents.private split`.
+
 ## Generating the mutants
 
 ```

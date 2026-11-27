@@ -31,6 +31,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from pbt_agents import private
 from pbt_agents.sandbox.runner import MAX_CONCURRENT, SandboxUnavailable, run_code
 
 # Runs inside the sandbox. __DATA__ is replaced by a Python string literal holding the job as JSON.
@@ -177,11 +178,10 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
     """-> one record per distinct (task, failing input), with the decision, y* and per-candidate verdicts."""
     labels = labels if labels is not None else {}
     tmap = {t["id"]: t for t in tasks}
-    src = {}
+    src = dict(private.load_canonical())   # trusted code only: agents never get this
     prompt_of = {}
     for m in mutants:
         prompt_of[m["task_id"]] = m["prompt"]
-        src[m["task_id"]] = m["prompt"] + m["canonical_solution"]
         src[m["id"]] = m["prompt"] + m["mutated_solution"]
 
     inputs = defaultdict(lambda: {"cands": set(), "props": defaultdict(set)})
@@ -207,7 +207,7 @@ def vote(tasks: list[dict], rows: list[dict], mutants: list[dict], tau: float = 
         info["args_repr"] = rep
         return item, info
 
-    items = [(k, v) for k, v in inputs.items() if k[0] in tmap]
+    items = [(k, v) for k, v in inputs.items() if k[0] in tmap and all(c in src for c in v["cands"])]
     with ThreadPoolExecutor(max(1, workers)) as ex:
         probed = list(ex.map(probe, items))
 

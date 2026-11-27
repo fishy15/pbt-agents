@@ -46,6 +46,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from pbt_agents import private
 from pbt_agents.sandbox.runner import MAX_CONCURRENT, SandboxUnavailable, run_code
 
 # Runs inside the sandbox. __DATA__ is replaced by a Python string literal holding the job as JSON.
@@ -231,6 +232,7 @@ def run(tasks: list[dict], mutants: list[dict], examples: int = 200, timeout: fl
     by_task = defaultdict(list)
     for m in mutants:
         by_task[m["task_id"]].append(m)
+    canon = private.load_canonical()
     jobs = []  # (task, candidate id, kind, source)
     for t in tasks:
         if not t.get("properties") or not t.get("propertySets"):
@@ -241,7 +243,10 @@ def run(tasks: list[dict], mutants: list[dict], examples: int = 200, timeout: fl
             print(f"warning: no mutants for {t['id']}", file=sys.stderr)
             continue
         m0 = ms[0]
-        jobs.append((t, t["id"], "canonical", m0["prompt"] + m0["canonical_solution"]))
+        if t["id"] in canon:
+            jobs.append((t, t["id"], "canonical", canon[t["id"]]))
+        else:
+            print(f"warning: no canonical solution for {t['id']} (see pbt_agents.private); not sanity-checked", file=sys.stderr)
         jobs += [(t, m["id"], "mutant", m["prompt"] + m["mutated_solution"]) for m in ms]
 
     def one(job):

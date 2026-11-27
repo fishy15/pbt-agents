@@ -5,8 +5,8 @@ intended output y*. This module turns those labels into repair jobs, checks prop
 sandbox, and scores finished repairs. The repair itself is done by subagents (the `repair` workflow,
 `.claude/workflows/repair.js`), which call `show` and `check` below.
 
-The program under test is repaired (a mutant, or the canonical solution if it was voted wrong); the
-witnesses are not touched. A repair is judged only from the spec, the confirmed cases and the shared
+Only mutants are repaired (a canonical solution voted wrong gets no job; the private canonical
+solutions are never put in a job); the witnesses are not touched. A repair is judged only from the spec, the confirmed cases and the shared
 properties. The canonical solution is never shown to the repair agent. `evaluate` uses it afterwards,
 as a held-out measure of whether the repair really restored the original behaviour.
 
@@ -32,7 +32,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from pbt_agents import harness
+from pbt_agents import harness, private
 from pbt_agents.sandbox.runner import MAX_CONCURRENT, SandboxUnavailable, run_code
 
 _PRELUDE = r'''
@@ -169,7 +169,6 @@ def make_jobs(tasks: list[dict], votes: list[dict], mutants: list[dict]) -> dict
     tmap = {t["id"]: t for t in tasks}
     info = {}
     for m in mutants:
-        info[m["task_id"]] = (m["prompt"], "canonical", m["prompt"] + m["canonical_solution"])
         info[m["id"]] = (m["prompt"], "mutant", m["prompt"] + m["mutated_solution"])
     jobs = {}
     for v in votes:
@@ -263,7 +262,7 @@ def agrees_with_canonical(code: str, reference: str, task: dict, entry_point: st
 
 
 def evaluate(jobs: dict, repairs: list[dict], mutants: list[dict], workers: int = MAX_CONCURRENT) -> list[dict]:
-    canon = {m["task_id"]: m["prompt"] + m["canonical_solution"] for m in mutants}
+    canon = private.load_canonical()
     by_id = {j["id"]: j for j in jobs["jobs"]}
 
     def one(rep):
@@ -275,10 +274,10 @@ def evaluate(jobs: dict, repairs: list[dict], mutants: list[dict], workers: int 
         rec = {"id": job["id"], "task_id": job["task_id"], "kind": job["kind"], "cases_fixed": r["cases_ok"],
                "cases_total": len(r["cases"]), "props_failing": sorted({f"{p['propset']}/{p['property']}" for p in r["props_failed"]}),
                "code": rep["code"], "notes": rep.get("notes", "")}
-        if job["kind"] == "mutant":
+        if job["kind"] == "mutant" and job["task_id"] in canon:
             v = agrees_with_canonical(rep["code"], canon[job["task_id"]], task, job["entry_point"])
             rec["canonical_checked"], rec["canonical_mismatches"] = v["checked"], v["mismatches"]
-        rec["verdict"] = ("repaired" if r["ok"] and (job["kind"] != "mutant" or not rec["canonical_mismatches"])
+        rec["verdict"] = ("repaired" if r["ok"] and not rec.get("canonical_mismatches")
                           else "plausible_only" if r["ok"] else "failed")
         return rec
 
